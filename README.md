@@ -65,7 +65,7 @@ uv sync --all-extras
 
 # 3. Configure
 cp .env.example .env
-# Edit .env: set COPILOT_JWT_SECRET to a random string
+# Edit .env: set AI_AGENT_JWT_SECRET to a random string
 
 # 4. Start infrastructure
 docker compose up -d postgres redis
@@ -78,32 +78,32 @@ The agent is now running at `ws://localhost:8484/ws/chat`.
 
 ## Configuration
 
-All settings are configured via environment variables with the `COPILOT_` prefix.
+All settings are configured via environment variables with the `AI_AGENT_` prefix.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `COPILOT_HOST` | `str` | `0.0.0.0` | Server bind address |
-| `COPILOT_PORT` | `int` | `8484` | Server port |
-| `COPILOT_WORKERS` | `int` | `4` | Uvicorn worker count |
-| `COPILOT_CORS_ORIGINS` | `list[str]` | `["*"]` | Allowed CORS origins |
-| `COPILOT_JWT_SECRET` | `str` | *required* | Secret key for JWT signing |
-| `COPILOT_JWT_ALGORITHM` | `str` | `HS256` | JWT algorithm |
-| `COPILOT_JWT_EXPIRY_HOURS` | `int` | `24` | JWT token expiry in hours |
-| `COPILOT_LLM_PROVIDER` | `str` | `openai` | LLM provider (openai, anthropic, google) |
-| `COPILOT_LLM_BASE_URL` | `str` | `http://localhost:11434/v1` | LLM API base URL |
-| `COPILOT_LLM_API_KEY` | `str` | `""` | LLM API key |
-| `COPILOT_LLM_MODEL` | `str` | `llama3.2:3b` | Model name |
-| `COPILOT_LLM_TEMPERATURE` | `float` | `0.7` | Sampling temperature |
-| `COPILOT_LLM_MAX_TOKENS` | `int` | `4096` | Max output tokens |
-| `COPILOT_MCP_SERVER_URL` | `str` | `http://localhost:8080/mcp` | MCP server endpoint |
-| `COPILOT_DATABASE_URL` | `str` | `postgresql+asyncpg://copilot:copilot@localhost:5432/copilot` | PostgreSQL connection |
-| `COPILOT_REDIS_URL` | `str` | `redis://localhost:6379/0` | Redis connection |
-| `COPILOT_RATE_LIMIT_REQUESTS` | `int` | `60` | Max requests per window |
-| `COPILOT_RATE_LIMIT_WINDOW_SECONDS` | `int` | `60` | Rate limit window in seconds |
-| `COPILOT_OTEL_ENDPOINT` | `str` | `""` | OTLP exporter endpoint (empty = disabled) |
-| `COPILOT_OTEL_SERVICE_NAME` | `str` | `copilot-agent` | OTEL service name |
-| `COPILOT_LOG_LEVEL` | `str` | `info` | Log level (debug, info, warning, error) |
-| `COPILOT_LOG_FORMAT` | `str` | `json` | Log format (json, console) |
+| `AI_AGENT_HOST` | `str` | `0.0.0.0` | Server bind address |
+| `AI_AGENT_PORT` | `int` | `8484` | Server port |
+| `AI_AGENT_WORKERS` | `int` | `4` | Uvicorn worker count |
+| `AI_AGENT_CORS_ORIGINS` | `list[str]` | `["*"]` | Allowed CORS origins |
+| `AI_AGENT_JWT_SECRET` | `str` | *required* | Secret key for JWT signing |
+| `AI_AGENT_JWT_ALGORITHM` | `str` | `HS256` | JWT algorithm |
+| `AI_AGENT_JWT_EXPIRY_HOURS` | `int` | `24` | JWT token expiry in hours |
+| `AI_AGENT_LLM_PROVIDER` | `str` | `openai` | LLM provider (openai, anthropic, google) |
+| `AI_AGENT_LLM_BASE_URL` | `str` | `http://localhost:11434/v1` | LLM API base URL |
+| `AI_AGENT_LLM_API_KEY` | `str` | `""` | LLM API key |
+| `AI_AGENT_LLM_MODEL` | `str` | `llama3.2:3b` | Model name |
+| `AI_AGENT_LLM_TEMPERATURE` | `float` | `0.7` | Sampling temperature |
+| `AI_AGENT_LLM_MAX_TOKENS` | `int` | `4096` | Max output tokens |
+| `AI_AGENT_MCP_SERVER_URL` | `str` | `http://localhost:8080/mcp` | MCP server endpoint |
+| `AI_AGENT_DATABASE_URL` | `str` | `postgresql+asyncpg://copilot:copilot@localhost:5432/copilot` | PostgreSQL connection |
+| `AI_AGENT_REDIS_URL` | `str` | `redis://localhost:6379/0` | Redis connection |
+| `AI_AGENT_RATE_LIMIT_REQUESTS` | `int` | `60` | Max requests per window |
+| `AI_AGENT_RATE_LIMIT_WINDOW_SECONDS` | `int` | `60` | Rate limit window in seconds |
+| `AI_AGENT_OTEL_ENDPOINT` | `str` | `""` | OTLP exporter endpoint (empty = disabled) |
+| `AI_AGENT_OTEL_SERVICE_NAME` | `str` | `copilot-agent` | OTEL service name |
+| `AI_AGENT_LOG_LEVEL` | `str` | `info` | Log level (debug, info, warning, error) |
+| `AI_AGENT_LOG_FORMAT` | `str` | `json` | Log format (json, console) |
 
 ## WebSocket Protocol
 
@@ -292,14 +292,14 @@ docker compose up -d
 
 ### Production Checklist
 
-- [ ] Set `COPILOT_JWT_SECRET` to a strong random value
-- [ ] Restrict `COPILOT_CORS_ORIGINS` to your Frappe domain
+- [ ] Set `AI_AGENT_JWT_SECRET` to a strong random value
+- [ ] Restrict `AI_AGENT_CORS_ORIGINS` to your Frappe domain
 - [ ] Use production PostgreSQL and Redis instances (not the bundled containers)
-- [ ] Set `COPILOT_OTEL_ENDPOINT` to your observability platform
-- [ ] Set `COPILOT_LOG_FORMAT=json` for structured log aggregation
-- [ ] Configure `COPILOT_LLM_API_KEY` for your chosen provider
+- [ ] Set `AI_AGENT_OTEL_ENDPOINT` to your observability platform
+- [ ] Set `AI_AGENT_LOG_FORMAT=json` for structured log aggregation
+- [ ] Configure `AI_AGENT_LLM_API_KEY` for your chosen provider
 - [ ] Run behind a reverse proxy (nginx/caddy) with TLS termination
-- [ ] Set `COPILOT_RATE_LIMIT_REQUESTS` appropriate for your user base
+- [ ] Set `AI_AGENT_RATE_LIMIT_REQUESTS` appropriate for your user base
 
 ## License
 

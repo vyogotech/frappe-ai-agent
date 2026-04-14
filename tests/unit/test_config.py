@@ -31,9 +31,9 @@ class TestSettings:
             Settings()
 
     def test_env_prefix(self, monkeypatch):
-        monkeypatch.setenv("COPILOT_JWT_SECRET", "from-env")
-        monkeypatch.setenv("COPILOT_PORT", "9999")
-        monkeypatch.setenv("COPILOT_LLM_MODEL", "mistral:7b")
+        monkeypatch.setenv("AI_AGENT_JWT_SECRET", "from-env")
+        monkeypatch.setenv("AI_AGENT_PORT", "9999")
+        monkeypatch.setenv("AI_AGENT_LLM_MODEL", "mistral:7b")
         settings = Settings()
         assert settings.jwt_secret == "from-env"
         assert settings.port == 9999

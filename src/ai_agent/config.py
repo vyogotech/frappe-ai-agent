@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="COPILOT_")
+    model_config = SettingsConfigDict(env_prefix="AI_AGENT_")
 
     # Server
     host: str = "0.0.0.0"
