@@ -30,9 +30,6 @@ class Settings(BaseSettings):
     # MCP
     mcp_server_url: str = "http://localhost:8080/mcp"
 
-    # PostgreSQL
-    database_url: str = "postgresql+asyncpg://copilot:copilot@localhost:5432/copilot"
-
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 

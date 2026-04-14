@@ -20,11 +20,7 @@ dependencies = [
     "langchain-openai>=0.3",
     "langchain-ollama>=0.3",
     "langchain-mcp-adapters>=0.1",
-    "langgraph-checkpoint-postgres>=0.1",
-    "asyncpg>=0.30",
-    "sqlalchemy[asyncio]>=2.0",
     "redis>=5.0",
-    "alembic>=1.14",
     "pyjwt>=2.9",
     "structlog>=24.1",
     "opentelemetry-api>=1.27",
@@ -58,7 +54,7 @@ select = ["F", "E", "W", "I", "UP", "B", "RUF"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
-    "integration: requires external services (PostgreSQL, Redis)",
+    "integration: requires external services (Redis)",
 ]
 
 [tool.hatch.build.targets.wheel]

@@ -16,9 +16,6 @@ class TestSettings:
         assert settings.llm_temperature == 0.7
         assert settings.llm_max_tokens == 4096
         assert settings.mcp_server_url == "http://localhost:8080/mcp"
-        assert (
-            settings.database_url == "postgresql+asyncpg://copilot:copilot@localhost:5432/copilot"
-        )
         assert settings.redis_url == "redis://localhost:6379/0"
         assert settings.rate_limit_requests == 60
         assert settings.rate_limit_window_seconds == 60
