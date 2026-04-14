@@ -7,7 +7,9 @@ from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.state import CompiledStateGraph
-from langgraph.prebuilt import create_react_agent
+from langgraph.prebuilt import ToolNode, create_react_agent
+
+from ai_agent.agent.tool_errors import to_tool_result_message
 
 
 def build_checkpointer() -> InMemorySaver:
@@ -21,10 +23,18 @@ def create_agent_graph(
     system_prompt: str,
     checkpointer: BaseCheckpointSaver | None = None,
 ) -> CompiledStateGraph:
-    """Create a LangGraph ReAct agent with optional persistence."""
+    """Create a LangGraph ReAct agent with optional persistence.
+
+    Tool errors (including generic exceptions like Frappe 403s) are caught at
+    the ToolNode level and turned into LLM-readable tool-result strings via
+    to_tool_result_message. Without this, LangGraph's default handler only
+    rescues ToolInvocationError and re-raises everything else, crashing the
+    graph on any real Frappe permission failure.
+    """
+    tool_node = ToolNode(tools, handle_tool_errors=to_tool_result_message)
     return create_react_agent(
         model=llm,
-        tools=tools,
+        tools=tool_node,
         prompt=system_prompt,
         checkpointer=checkpointer,
     )
