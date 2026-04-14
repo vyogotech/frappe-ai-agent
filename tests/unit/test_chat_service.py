@@ -262,6 +262,45 @@ async def test_handle_message_yields_error_on_exception_and_still_finishes_with_
 
 
 @pytest.mark.asyncio
+async def test_handle_message_sets_handle_tool_error_on_each_tool():
+    """Every tool returned from MCP must have handle_tool_error installed
+    before being handed to the graph factory."""
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    # Build a couple of fake tools that have the handle_tool_error attribute
+    tool_a = MagicMock()
+    tool_a.handle_tool_error = None
+    tool_b = MagicMock()
+    tool_b.handle_tool_error = None
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(return_value=[tool_a, tool_b])
+
+    mock_graph = MagicMock()
+    mock_graph.astream_events = _StreamFactory([])
+
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.create_agent_graph", return_value=mock_graph),
+    ):
+        await _drain(
+            service.handle_message(
+                message="hi",
+                session_id=None,
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    # Both tools must now have the error handler set
+    from ai_agent.agent.tool_errors import to_tool_result_message
+
+    assert tool_a.handle_tool_error is to_tool_result_message
+    assert tool_b.handle_tool_error is to_tool_result_message
+
+
+@pytest.mark.asyncio
 async def test_handle_message_uses_session_id_as_thread_id():
     service = _make_service()
     user_context = UserContext(sid="abc123")

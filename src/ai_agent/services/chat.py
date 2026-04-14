@@ -20,6 +20,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from ai_agent.agent.graph import create_agent_graph
 from ai_agent.agent.prompts import build_system_prompt
+from ai_agent.agent.tool_errors import to_tool_result_message
 from ai_agent.config import Settings
 from ai_agent.integrations.mcp import build_mcp_client_for_sid
 from ai_agent.middleware.sid import UserContext
@@ -73,6 +74,14 @@ class ChatService:
             # Per-request MCP client carrying the caller's sid cookie.
             mcp_client = build_mcp_client_for_sid(self._settings, user_context.sid)
             tools = await mcp_client.get_tools()
+
+            # Install an error handler on every tool so exceptions raised by
+            # individual tool calls become LLM-visible tool observations
+            # instead of aborting the whole graph run. The ToolNode in
+            # LangGraph catches the exception and returns the handler's
+            # string as the tool result; the LLM then responds gracefully.
+            for tool in tools:
+                tool.handle_tool_error = to_tool_result_message
 
             logger.debug(
                 "chat_tools_loaded",
