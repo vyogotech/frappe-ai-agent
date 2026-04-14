@@ -40,6 +40,7 @@ dev = [
     "ruff>=0.8",
     "pyright>=1.1",
     "fakeredis>=2.26",
+    "respx>=0.21",
 ]
 
 [tool.ruff]
