@@ -23,7 +23,6 @@ from ai_agent.services.health import HealthService
 from ai_agent.services.session import SessionService
 from ai_agent.transport.rest import create_rest_router
 from ai_agent.transport.sse import create_sse_router
-from ai_agent.transport.websocket import create_ws_router
 
 logger = structlog.get_logger()
 
@@ -71,14 +70,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Register routes
         app.include_router(
             create_rest_router(settings=settings, health_service=health_service, tools=tools)
-        )
-        app.include_router(
-            create_ws_router(
-                chat_service=chat_service,
-                rate_limiter=rate_limiter,
-                jwt_secret=settings.jwt_secret,
-                jwt_algorithm=settings.jwt_algorithm,
-            )
         )
         app.include_router(create_sse_router())
 
