@@ -1,1 +1,1 @@
-"""Transport layer — WebSocket and REST endpoints."""
+"""Transport layer — REST utility endpoints and the SSE chat route."""
