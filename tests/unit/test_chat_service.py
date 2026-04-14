@@ -256,8 +256,9 @@ async def test_handle_message_yields_error_on_exception_and_still_finishes_with_
     error_events = [e for e in events if e["type"] == "error"]
     assert len(error_events) == 1
     assert "mcp down" in error_events[0]["message"]
-    # Generator still emits a terminal `done` even on failure.
+    # Generator still emits a terminal `done` even on failure, with low quality.
     assert events[-1]["type"] == "done"
+    assert events[-1]["data_quality"] == "low"
 
 
 @pytest.mark.asyncio
