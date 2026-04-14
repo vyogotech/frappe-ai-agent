@@ -30,6 +30,18 @@ def content_block_event(block: dict[str, Any]) -> Event:
     return {"type": "content_block", "block": block}
 
 
+def session_event(session_id: str) -> Event:
+    """Announce the session id for the current conversation.
+
+    Emitted once at the very start of every request, after the server
+    resolves (or creates) the session. Clients store the id so that
+    subsequent messages in the same conversation can pass it back in
+    the request body — without this round-trip every message would
+    create a brand-new AI Chat Session row.
+    """
+    return {"type": "session", "id": session_id}
+
+
 def done_event(tools_called: list[str], data_quality: str, timestamp: str) -> Event:
     return {
         "type": "done",

@@ -3,6 +3,7 @@ from ai_agent.transport.sse_events import (
     done_event,
     error_event,
     serialize,
+    session_event,
     status_event,
     tool_call_event,
 )
@@ -40,3 +41,8 @@ def test_done_event_serialization():
 def test_error_event_serialization():
     e = error_event("Ollama is unreachable")
     assert serialize(e) == b'data: {"type":"error","message":"Ollama is unreachable"}\n\n'
+
+
+def test_session_event_serialization():
+    e = session_event("sess-42")
+    assert serialize(e) == b'data: {"type":"session","id":"sess-42"}\n\n'

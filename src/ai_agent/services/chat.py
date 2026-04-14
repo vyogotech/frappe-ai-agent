@@ -111,6 +111,12 @@ class ChatService:
             else:
                 session_id = created
 
+        # Announce the session id so the frontend can remember it and
+        # pass it back on subsequent messages in the same conversation.
+        # Without this round-trip every user message would land in a
+        # brand-new AI Chat Session row.
+        yield {"type": "session", "id": session_id}
+
         # Persist the user's message. Best-effort; failures do not abort.
         await self._history.save_message(
             sid=user_context.sid,
