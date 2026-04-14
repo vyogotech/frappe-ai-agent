@@ -22,8 +22,9 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.7
     llm_max_tokens: int = 4096
 
-    # MCP (streamable HTTP transport is on port 8081; 8080 was the legacy REST API)
-    mcp_server_url: str = "http://localhost:8081/mcp"
+    # MCP: Streamable HTTP endpoint. frappe-mcp-server mounts /mcp on its
+    # main HTTP port (default 8080), NOT the port+1 MCP-protocol-only server.
+    mcp_server_url: str = "http://localhost:8080/mcp"
 
     # Frappe URL for chat history persistence
     frappe_url: str = "http://localhost:8000"

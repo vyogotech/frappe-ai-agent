@@ -12,7 +12,7 @@ class TestSettings:
         assert settings.llm_model == "qwen3.5:9b"
         assert settings.llm_temperature == 0.7
         assert settings.llm_max_tokens == 4096
-        assert settings.mcp_server_url == "http://localhost:8081/mcp"
+        assert settings.mcp_server_url == "http://localhost:8080/mcp"
         assert settings.frappe_url == "http://localhost:8000"
         assert settings.redis_url == "redis://localhost:6379/0"
         assert settings.log_level == "info"
