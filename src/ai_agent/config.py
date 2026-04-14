@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8484
     workers: int = 4
-    cors_origins: list[str] = ["http://localhost:8080"]
+    cors_origins: list[str] = ["http://localhost:8000"]
 
     # LLM
     llm_provider: str = "ollama"

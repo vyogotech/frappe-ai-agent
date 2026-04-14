@@ -93,12 +93,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     # Middleware
+    # Credentialed CORS: the Frappe frontend forwards the `sid` cookie so the
+    # agent can authenticate the caller against Frappe. That requires an
+    # explicit origin list (no "*") and allow_credentials=True.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["POST", "GET", "OPTIONS"],
+        allow_headers=["Content-Type", "Accept", "Cookie"],
     )
     app.add_middleware(RequestIDMiddleware)
 
