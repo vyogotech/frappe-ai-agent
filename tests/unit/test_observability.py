@@ -1,8 +1,8 @@
 import structlog
 
-from copilot_agent.observability.logging import setup_logging
-from copilot_agent.observability.metrics import create_meter
-from copilot_agent.observability.tracing import create_tracer_provider
+from ai_agent.observability.logging import setup_logging
+from ai_agent.observability.metrics import create_meter
+from ai_agent.observability.tracing import create_tracer_provider
 
 
 class TestLogging:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from copilot_agent.integrations.redis import RedisClient
+from ai_agent.integrations.redis import RedisClient
 
 
 class RateLimiter:

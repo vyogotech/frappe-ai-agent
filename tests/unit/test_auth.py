@@ -1,7 +1,7 @@
 import jwt
 import pytest
 
-from copilot_agent.middleware.auth import create_token, verify_token
+from ai_agent.middleware.auth import create_token, verify_token
 
 
 class TestJWTAuth:

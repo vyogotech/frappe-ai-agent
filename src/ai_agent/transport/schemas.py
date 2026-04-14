@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from copilot_agent.schemas import (
+from ai_agent.schemas import (
     AckEvent,
     ContentBlockEvent,
     DoneEvent,

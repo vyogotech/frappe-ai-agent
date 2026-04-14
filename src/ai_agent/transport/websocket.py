@@ -7,10 +7,10 @@ import json
 import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from copilot_agent.middleware.auth import verify_token
-from copilot_agent.middleware.rate_limit import RateLimiter
-from copilot_agent.services.chat import ChatService
-from copilot_agent.transport.schemas import ChatMessage, ErrorEvent
+from ai_agent.middleware.auth import verify_token
+from ai_agent.middleware.rate_limit import RateLimiter
+from ai_agent.services.chat import ChatService
+from ai_agent.transport.schemas import ChatMessage, ErrorEvent
 
 logger = structlog.get_logger()
 

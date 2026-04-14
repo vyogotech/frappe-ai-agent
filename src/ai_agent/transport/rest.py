@@ -5,8 +5,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Query
 from langchain_core.tools import BaseTool
 
-from copilot_agent.config import Settings
-from copilot_agent.services.health import HealthService
+from ai_agent.config import Settings
+from ai_agent.services.health import HealthService
 
 
 def create_rest_router(

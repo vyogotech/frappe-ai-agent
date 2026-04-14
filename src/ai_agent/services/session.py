@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from copilot_agent.integrations.redis import RedisClient
+from ai_agent.integrations.redis import RedisClient
 
 
 class SessionService:

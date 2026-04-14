@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from copilot_agent.blocks.models import ContentBlock
-from copilot_agent.blocks.parser import parse_blocks
+from ai_agent.blocks.models import ContentBlock
+from ai_agent.blocks.parser import parse_blocks
 
 
 def parse_agent_output(text: str) -> list[ContentBlock]:

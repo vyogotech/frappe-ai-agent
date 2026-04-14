@@ -8,22 +8,22 @@ import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from copilot_agent.agent.graph import create_agent_graph
-from copilot_agent.agent.prompts import build_system_prompt
-from copilot_agent.config import Settings
-from copilot_agent.integrations.llm import create_llm
-from copilot_agent.integrations.mcp import create_mcp_client
-from copilot_agent.integrations.postgres import create_checkpointer
-from copilot_agent.integrations.redis import RedisClient
-from copilot_agent.middleware.rate_limit import RateLimiter
-from copilot_agent.middleware.request_id import RequestIDMiddleware
-from copilot_agent.observability.logging import setup_logging
-from copilot_agent.observability.tracing import create_tracer_provider
-from copilot_agent.services.chat import ChatService
-from copilot_agent.services.health import HealthService
-from copilot_agent.services.session import SessionService
-from copilot_agent.transport.rest import create_rest_router
-from copilot_agent.transport.websocket import create_ws_router
+from ai_agent.agent.graph import create_agent_graph
+from ai_agent.agent.prompts import build_system_prompt
+from ai_agent.config import Settings
+from ai_agent.integrations.llm import create_llm
+from ai_agent.integrations.mcp import create_mcp_client
+from ai_agent.integrations.postgres import create_checkpointer
+from ai_agent.integrations.redis import RedisClient
+from ai_agent.middleware.rate_limit import RateLimiter
+from ai_agent.middleware.request_id import RequestIDMiddleware
+from ai_agent.observability.logging import setup_logging
+from ai_agent.observability.tracing import create_tracer_provider
+from ai_agent.services.chat import ChatService
+from ai_agent.services.health import HealthService
+from ai_agent.services.session import SessionService
+from ai_agent.transport.rest import create_rest_router
+from ai_agent.transport.websocket import create_ws_router
 
 logger = structlog.get_logger()
 

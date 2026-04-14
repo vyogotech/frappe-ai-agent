@@ -1,8 +1,8 @@
 import pytest
 from fakeredis import aioredis as fakeredis_aio
 
-from copilot_agent.integrations.redis import RedisClient
-from copilot_agent.services.session import SessionService
+from ai_agent.integrations.redis import RedisClient
+from ai_agent.services.session import SessionService
 
 
 @pytest.fixture

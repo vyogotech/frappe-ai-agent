@@ -1,7 +1,7 @@
-from copilot_agent.agent.output import parse_agent_output
-from copilot_agent.agent.prompts import build_system_prompt
-from copilot_agent.agent.state import AgentState
-from copilot_agent.blocks.models import TableBlock, TextBlock
+from ai_agent.agent.output import parse_agent_output
+from ai_agent.agent.prompts import build_system_prompt
+from ai_agent.agent.state import AgentState
+from ai_agent.blocks.models import TableBlock, TextBlock
 
 
 class TestAgentState:

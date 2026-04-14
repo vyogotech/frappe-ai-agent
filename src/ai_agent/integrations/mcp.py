@@ -6,7 +6,7 @@ from datetime import timedelta
 
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
-from copilot_agent.config import Settings
+from ai_agent.config import Settings
 
 
 def create_mcp_client(settings: Settings) -> MultiServerMCPClient:

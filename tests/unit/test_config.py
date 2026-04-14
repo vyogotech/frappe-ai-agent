@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from copilot_agent.config import Settings
+from ai_agent.config import Settings
 
 
 class TestSettings:

@@ -7,8 +7,8 @@ from typing import Any
 import httpx
 import structlog
 
-from copilot_agent.config import Settings
-from copilot_agent.integrations.redis import RedisClient
+from ai_agent.config import Settings
+from ai_agent.integrations.redis import RedisClient
 
 logger = structlog.get_logger()
 

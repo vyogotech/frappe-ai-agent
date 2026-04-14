@@ -9,8 +9,8 @@ import structlog
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.graph.state import CompiledStateGraph
 
-from copilot_agent.agent.output import parse_agent_output
-from copilot_agent.schemas import (
+from ai_agent.agent.output import parse_agent_output
+from ai_agent.schemas import (
     AckEvent,
     ContentBlockEvent,
     DoneEvent,

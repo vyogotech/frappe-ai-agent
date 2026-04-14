@@ -4,9 +4,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from copilot_agent.config import Settings
-from copilot_agent.services.health import HealthService
-from copilot_agent.transport.rest import create_rest_router
+from ai_agent.config import Settings
+from ai_agent.services.health import HealthService
+from ai_agent.transport.rest import create_rest_router
 
 
 @pytest.fixture

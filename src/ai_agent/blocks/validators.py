@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from copilot_agent.blocks.models import (
+from ai_agent.blocks.models import (
     ChartBlock,
     ContentBlock,
     KPIBlock,

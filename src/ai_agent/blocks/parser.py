@@ -8,7 +8,7 @@ import re
 import structlog
 from pydantic import ValidationError
 
-from copilot_agent.blocks.models import (
+from ai_agent.blocks.models import (
     ChartBlock,
     ContentBlock,
     KPIBlock,
@@ -16,7 +16,7 @@ from copilot_agent.blocks.models import (
     TableBlock,
     TextBlock,
 )
-from copilot_agent.blocks.validators import validate_block
+from ai_agent.blocks.validators import validate_block
 
 logger = structlog.get_logger()
 

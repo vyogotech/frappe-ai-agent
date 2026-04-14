@@ -5,7 +5,7 @@ from __future__ import annotations
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
 
-from copilot_agent.config import Settings
+from ai_agent.config import Settings
 
 
 def create_llm(settings: Settings) -> BaseChatModel:

@@ -1,12 +1,12 @@
 from unittest.mock import patch
 
-from copilot_agent.config import Settings
-from copilot_agent.integrations.llm import create_llm
-from copilot_agent.integrations.mcp import create_mcp_client
+from ai_agent.config import Settings
+from ai_agent.integrations.llm import create_llm
+from ai_agent.integrations.mcp import create_mcp_client
 
 
 class TestCreateLLM:
-    @patch("copilot_agent.integrations.llm.init_chat_model")
+    @patch("ai_agent.integrations.llm.init_chat_model")
     def test_creates_model_with_settings(self, mock_init):
         settings = Settings(jwt_secret="test")
         create_llm(settings)
@@ -19,7 +19,7 @@ class TestCreateLLM:
             max_tokens=4096,
         )
 
-    @patch("copilot_agent.integrations.llm.init_chat_model")
+    @patch("ai_agent.integrations.llm.init_chat_model")
     def test_passes_api_key_when_set(self, mock_init):
         settings = Settings(jwt_secret="test", llm_api_key="sk-123")
         create_llm(settings)
