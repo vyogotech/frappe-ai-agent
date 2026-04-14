@@ -14,11 +14,6 @@ class Settings(BaseSettings):
     workers: int = 4
     cors_origins: list[str] = ["http://localhost:8080"]
 
-    # Auth
-    jwt_secret: str
-    jwt_algorithm: str = "HS256"
-    jwt_expiry_hours: int = 24
-
     # LLM
     llm_provider: str = "ollama"
     llm_base_url: str = "http://localhost:11434"

@@ -11,7 +11,7 @@ from ai_agent.transport.rest import create_rest_router
 
 @pytest.fixture
 def settings():
-    return Settings(jwt_secret="test-secret")
+    return Settings()
 
 
 @pytest.fixture
@@ -59,7 +59,6 @@ class TestConfigEndpoint:
         assert resp.status_code == 200
         data = resp.json()
         assert data["llm_model"] == "qwen3.5:9b"
-        assert "jwt_secret" not in data
 
 
 class TestToolsEndpoint:

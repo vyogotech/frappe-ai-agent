@@ -1,12 +1,9 @@
-import pytest
-from pydantic import ValidationError
-
 from ai_agent.config import Settings
 
 
 class TestSettings:
     def test_defaults(self):
-        settings = Settings(jwt_secret="test-secret")
+        settings = Settings()
         assert settings.host == "0.0.0.0"
         assert settings.port == 8484
         assert settings.workers == 4
@@ -23,15 +20,9 @@ class TestSettings:
         assert settings.log_format == "json"
         assert settings.otel_endpoint == ""
 
-    def test_jwt_secret_required(self):
-        with pytest.raises(ValidationError):
-            Settings()
-
     def test_env_prefix(self, monkeypatch):
-        monkeypatch.setenv("AI_AGENT_JWT_SECRET", "from-env")
         monkeypatch.setenv("AI_AGENT_PORT", "9999")
         monkeypatch.setenv("AI_AGENT_LLM_MODEL", "mistral:7b")
         settings = Settings()
-        assert settings.jwt_secret == "from-env"
         assert settings.port == 9999
         assert settings.llm_model == "mistral:7b"
