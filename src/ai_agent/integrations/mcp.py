@@ -27,6 +27,9 @@ def build_mcp_client_for_sid(settings: Settings, sid: str) -> MultiServerMCPClie
 
     Every call to this function returns a NEW client. Sharing clients across
     requests would leak one user's sid into another user's tool calls.
+
+    Raises:
+        ValueError: if sid is empty or whitespace-only.
     """
     if not sid or not sid.strip():
         raise ValueError("build_mcp_client_for_sid requires a non-empty sid")

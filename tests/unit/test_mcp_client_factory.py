@@ -1,3 +1,5 @@
+import pytest
+
 from ai_agent.config import Settings
 from ai_agent.integrations.mcp import build_mcp_client_for_sid
 
@@ -17,13 +19,12 @@ def test_client_is_built_with_sid_cookie_header():
     settings = _make_settings()
     client = build_mcp_client_for_sid(settings, sid="abc123")
 
-    # The MCP client must carry Cookie: sid=abc123 on its one configured server.
-    # langchain-mcp-adapters exposes the raw connections dict as `client.connections`.
-    assert "frappe" in client.connections
+    # Exactly one server registered — catches regressions where both old and
+    # new factory names end up registered together.
+    assert list(client.connections.keys()) == ["frappe"]
     server_cfg = client.connections["frappe"]
     assert server_cfg.get("url") == "http://mcp:8080/mcp"
-    # Header key name depends on langchain-mcp-adapters' streamable_http config;
-    # adjust below if the library uses a different key than 'headers'.
+    assert server_cfg.get("transport") == "streamable_http"
     assert server_cfg.get("headers", {}).get("Cookie") == "sid=abc123"
 
 
@@ -38,6 +39,11 @@ def test_two_sids_produce_two_distinct_clients():
 
 def test_empty_sid_raises():
     settings = _make_settings()
-    import pytest as _pytest
-    with _pytest.raises(ValueError):
+    with pytest.raises(ValueError):
         build_mcp_client_for_sid(settings, sid="")
+
+
+def test_whitespace_sid_raises():
+    settings = _make_settings()
+    with pytest.raises(ValueError):
+        build_mcp_client_for_sid(settings, sid="   ")
