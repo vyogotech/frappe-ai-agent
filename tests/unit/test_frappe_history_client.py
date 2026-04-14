@@ -1,46 +1,70 @@
+import json
+
 import httpx
 import pytest
 import respx
 
 from ai_agent.integrations.frappe_history import FrappeHistoryClient
 
+_CSRF_URL = "http://frappe:8000/api/method/frappe.auth.get_logged_user"
+_SESSION_URL = "http://frappe:8000/api/resource/AI Chat Session"
+_MESSAGE_URL = "http://frappe:8000/api/resource/AI Chat Message"
+_FAKE_CSRF = "csrf-abc123"
+
+
+def _mock_csrf_ok() -> None:
+    """Respond to the CSRF GET with a fresh token in the response header."""
+    respx.get(_CSRF_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={"message": "Administrator"},
+            headers={"X-Frappe-CSRF-Token": _FAKE_CSRF},
+        )
+    )
+
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_create_session_posts_with_sid_cookie():
-    respx.post("http://frappe:8000/api/resource/AI Chat Session").mock(
+async def test_create_session_posts_with_sid_and_csrf():
+    _mock_csrf_ok()
+    respx.post(_SESSION_URL).mock(
         return_value=httpx.Response(200, json={"data": {"name": "sess-123"}})
     )
     client = FrappeHistoryClient(base_url="http://frappe:8000")
+
     name = await client.create_session(
         sid="abc123",
         title="first message",
         context_json="{}",
     )
+
     assert name == "sess-123"
-    called = respx.calls[-1].request
-    assert called.headers["Cookie"] == "sid=abc123"
+    post = next(c.request for c in respx.calls if c.request.method == "POST")
+    assert post.headers["Cookie"] == "sid=abc123"
+    assert post.headers["X-Frappe-CSRF-Token"] == _FAKE_CSRF
 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_save_message_posts_with_sid_cookie_and_fields():
-    respx.post("http://frappe:8000/api/resource/AI Chat Message").mock(
+async def test_save_message_posts_with_sid_and_csrf_and_fields():
+    _mock_csrf_ok()
+    respx.post(_MESSAGE_URL).mock(
         return_value=httpx.Response(200, json={"data": {"name": "msg-1"}})
     )
     client = FrappeHistoryClient(base_url="http://frappe:8000")
+
     name = await client.save_message(
         sid="abc123",
         session="sess-123",
         role="user",
         content="hello",
     )
+
     assert name == "msg-1"
-    called = respx.calls[-1].request
-    assert called.headers["Cookie"] == "sid=abc123"
-    # Assert the body contains the right fields
-    import json
-    body = json.loads(called.content)
+    post = next(c.request for c in respx.calls if c.request.method == "POST")
+    assert post.headers["Cookie"] == "sid=abc123"
+    assert post.headers["X-Frappe-CSRF-Token"] == _FAKE_CSRF
+    body = json.loads(post.content)
     assert body["session"] == "sess-123"
     assert body["role"] == "user"
     assert body["content"] == "hello"
@@ -48,11 +72,91 @@ async def test_save_message_posts_with_sid_cookie_and_fields():
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_create_session_returns_none_on_http_error(caplog):
-    respx.post("http://frappe:8000/api/resource/AI Chat Session").mock(
-        return_value=httpx.Response(500)
+async def test_csrf_token_is_cached_across_calls():
+    _mock_csrf_ok()
+    respx.post(_MESSAGE_URL).mock(
+        return_value=httpx.Response(200, json={"data": {"name": "msg-1"}})
     )
     client = FrappeHistoryClient(base_url="http://frappe:8000")
+
+    # Three writes with the same sid should only fetch CSRF once.
+    await client.save_message(sid="abc", session="s", role="user", content="a")
+    await client.save_message(sid="abc", session="s", role="user", content="b")
+    await client.save_message(sid="abc", session="s", role="user", content="c")
+
+    csrf_calls = [c for c in respx.calls if c.request.method == "GET"]
+    assert len(csrf_calls) == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_csrf_token_is_refetched_per_sid():
+    """Different sids must not share a cached token."""
+    _mock_csrf_ok()
+    respx.post(_MESSAGE_URL).mock(
+        return_value=httpx.Response(200, json={"data": {"name": "msg-1"}})
+    )
+    client = FrappeHistoryClient(base_url="http://frappe:8000")
+
+    await client.save_message(sid="user-a", session="s", role="user", content="a")
+    await client.save_message(sid="user-b", session="s", role="user", content="b")
+
+    csrf_calls = [c for c in respx.calls if c.request.method == "GET"]
+    assert len(csrf_calls) == 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_write_retried_once_on_csrf_error():
+    """If the first POST returns a CSRF error, the client should refresh
+    its token and retry the write exactly once."""
+    # First CSRF fetch returns token A. A second fetch (after invalidation)
+    # returns token B. The POST rejects token A with CSRF error, accepts B.
+    csrf_route = respx.get(_CSRF_URL).mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json={"message": "Administrator"},
+                headers={"X-Frappe-CSRF-Token": "token-a"},
+            ),
+            httpx.Response(
+                200,
+                json={"message": "Administrator"},
+                headers={"X-Frappe-CSRF-Token": "token-b"},
+            ),
+        ]
+    )
+    post_route = respx.post(_MESSAGE_URL).mock(
+        side_effect=[
+            httpx.Response(
+                400,
+                json={"exc_type": "CSRFTokenError"},
+                text='{"exc_type":"CSRFTokenError","message":"Invalid CSRF token"}',
+            ),
+            httpx.Response(200, json={"data": {"name": "msg-1"}}),
+        ]
+    )
+
+    client = FrappeHistoryClient(base_url="http://frappe:8000")
+    name = await client.save_message(
+        sid="abc", session="s", role="user", content="hi"
+    )
+
+    assert name == "msg-1"
+    assert csrf_route.call_count == 2
+    assert post_route.call_count == 2
+    # The retry must use the fresh token, not the stale one.
+    second_post = post_route.calls[1].request
+    assert second_post.headers["X-Frappe-CSRF-Token"] == "token-b"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_create_session_returns_none_on_http_error(caplog):
+    _mock_csrf_ok()
+    respx.post(_SESSION_URL).mock(return_value=httpx.Response(500))
+    client = FrappeHistoryClient(base_url="http://frappe:8000")
+
     result = await client.create_session(
         sid="abc123",
         title="t",
@@ -64,10 +168,10 @@ async def test_create_session_returns_none_on_http_error(caplog):
 @pytest.mark.asyncio
 @respx.mock
 async def test_save_message_returns_none_on_http_error():
-    respx.post("http://frappe:8000/api/resource/AI Chat Message").mock(
-        return_value=httpx.Response(500)
-    )
+    _mock_csrf_ok()
+    respx.post(_MESSAGE_URL).mock(return_value=httpx.Response(500))
     client = FrappeHistoryClient(base_url="http://frappe:8000")
+
     result = await client.save_message(
         sid="abc", session="sess-1", role="user", content="hi"
     )
@@ -77,10 +181,12 @@ async def test_save_message_returns_none_on_http_error():
 @pytest.mark.asyncio
 @respx.mock
 async def test_save_message_forwards_optional_tool_fields():
-    respx.post("http://frappe:8000/api/resource/AI Chat Message").mock(
+    _mock_csrf_ok()
+    respx.post(_MESSAGE_URL).mock(
         return_value=httpx.Response(200, json={"data": {"name": "msg-2"}})
     )
     client = FrappeHistoryClient(base_url="http://frappe:8000")
+
     await client.save_message(
         sid="abc",
         session="sess-1",
@@ -90,8 +196,29 @@ async def test_save_message_forwards_optional_tool_fields():
         tool_args_json='{"status": "unpaid"}',
         tool_result_json='{"count": 3}',
     )
-    import json
-    body = json.loads(respx.calls[-1].request.content)
+
+    post = next(c.request for c in respx.calls if c.request.method == "POST")
+    body = json.loads(post.content)
     assert body["tool_name"] == "list_invoices"
     assert body["tool_args_json"] == '{"status": "unpaid"}'
     assert body["tool_result_json"] == '{"count": 3}'
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_write_proceeds_without_token_when_csrf_fetch_fails():
+    """If Frappe's get_logged_user is down, the client should still try
+    to POST (Frappe may reject with 400, which becomes a None return)."""
+    respx.get(_CSRF_URL).mock(return_value=httpx.Response(500))
+    respx.post(_MESSAGE_URL).mock(
+        return_value=httpx.Response(200, json={"data": {"name": "msg-1"}})
+    )
+    client = FrappeHistoryClient(base_url="http://frappe:8000")
+
+    name = await client.save_message(
+        sid="abc", session="s", role="user", content="hi"
+    )
+
+    assert name == "msg-1"
+    post = next(c.request for c in respx.calls if c.request.method == "POST")
+    assert "X-Frappe-CSRF-Token" not in post.headers
