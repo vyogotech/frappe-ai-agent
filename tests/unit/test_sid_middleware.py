@@ -1,4 +1,7 @@
 # tests/unit/test_sid_middleware.py
+from dataclasses import FrozenInstanceError
+
+import pytest
 from starlette.requests import Request
 
 from ai_agent.middleware.sid import UserContext, extract_user_context
@@ -35,3 +38,25 @@ def test_extract_user_context_returns_none_when_sid_empty():
     req = _make_request("")
     ctx = extract_user_context(req)
     assert ctx is None
+
+
+def test_extract_user_context_returns_none_when_sid_whitespace_only():
+    req = _make_request("   ")
+    ctx = extract_user_context(req)
+    assert ctx is None
+
+
+def test_user_context_is_frozen():
+    ctx = UserContext(sid="abc123")
+    with pytest.raises(FrozenInstanceError):
+        ctx.sid = "other"  # type: ignore[misc]
+
+
+def test_user_context_rejects_empty_sid_at_construction():
+    with pytest.raises(ValueError):
+        UserContext(sid="")
+
+
+def test_user_context_rejects_whitespace_sid_at_construction():
+    with pytest.raises(ValueError):
+        UserContext(sid="   ")
