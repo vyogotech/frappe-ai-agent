@@ -1,86 +1,162 @@
-"""Chat service — orchestrates agent invocation and streaming."""
+"""Per-request chat orchestration.
+
+`ChatService` holds the long-lived pieces (settings, llm, checkpointer, and a
+system-prompt builder) and builds a fresh MCP client + LangGraph agent per call
+to `handle_message`. Every request uses the caller's sid to authenticate with
+the MCP server so tool calls run under that Frappe user's permissions.
+
+Events yielded here must match the SSE schema in `transport.sse_events`:
+`status`, `tool_call`, `content`, `done`, `error`.
+"""
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Callable
 
 import structlog
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langgraph.graph.state import CompiledStateGraph
+from langchain_core.messages import AIMessage, HumanMessage
 
-from ai_agent.agent.output import parse_agent_output
-from ai_agent.schemas import (
-    AckEvent,
-    ContentBlockEvent,
-    DoneEvent,
-    ErrorEvent,
-    ToolEndEvent,
-    ToolStartEvent,
-)
+from ai_agent.agent.graph import create_agent_graph
+from ai_agent.agent.prompts import build_system_prompt
+from ai_agent.config import Settings
+from ai_agent.integrations.mcp import build_mcp_client_for_sid
+from ai_agent.middleware.sid import UserContext
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
+
+
+SystemPromptBuilder = Callable[[dict[str, Any]], str]
+
+
+def _utcnow_rfc3339_z() -> str:
+    """RFC3339 timestamp ending in `Z` (matches frappe-mcp-server format)."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 class ChatService:
-    def __init__(self, agent_graph: CompiledStateGraph) -> None:
-        self._graph = agent_graph
+    """Per-request agent invocation.
+
+    Instances are shared across requests but carry no per-user state. The
+    per-request graph + MCP client are built inside `handle_message`.
+    """
+
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        llm: Any,
+        checkpointer: Any,
+        system_prompt_builder: SystemPromptBuilder = build_system_prompt,
+    ) -> None:
+        self._settings = settings
+        self._llm = llm
+        self._checkpointer = checkpointer
+        self._build_system_prompt = system_prompt_builder
 
     async def handle_message(
         self,
-        content: str,
+        *,
+        message: str,
+        session_id: str | None,
         context: dict[str, Any],
-        session_id: str,
-        request_id: str,
-    ) -> AsyncIterator[dict]:
-        """Process a chat message and yield streaming events."""
-        # Ack
-        yield AckEvent(request_id=request_id, session_id=session_id).model_dump()
-
-        config = {"configurable": {"thread_id": session_id}}
-        input_messages = {"messages": [HumanMessage(content=content)]}
+        user_context: UserContext,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Run the graph for one message, yielding SSE-schema events."""
+        tools_called: list[str] = []
+        failed = False
 
         try:
-            async for event in self._graph.astream_events(
-                input_messages, config=config, version="v2"
+            yield {"type": "status", "message": "loading tools..."}
+
+            # Per-request MCP client carrying the caller's sid cookie.
+            mcp_client = build_mcp_client_for_sid(self._settings, user_context.sid)
+            tools = await mcp_client.get_tools()
+
+            logger.debug(
+                "chat_tools_loaded",
+                count=len(tools),
+                session_id=session_id,
+            )
+
+            # Per-request prompt lets the UI pass page context per message.
+            system_prompt = self._build_system_prompt(context or {})
+
+            # Cheap: create_react_agent just wires a graph around the model
+            # and tool list. No network calls here.
+            graph = create_agent_graph(
+                llm=self._llm,
+                tools=tools,
+                system_prompt=system_prompt,
+                checkpointer=self._checkpointer,
+            )
+
+            yield {"type": "status", "message": "thinking..."}
+
+            graph_input = {"messages": [HumanMessage(content=message)]}
+            graph_config = {
+                "configurable": {"thread_id": session_id or "default"},
+            }
+
+            async for event in graph.astream_events(
+                graph_input,
+                config=graph_config,
+                version="v2",
             ):
-                kind = event.get("event")
+                translated = self._translate_event(event, tools_called)
+                if translated is not None:
+                    yield translated
 
-                if kind == "on_tool_start":
-                    yield ToolStartEvent(
-                        call_id=event.get("run_id", ""),
-                        name=event.get("name", ""),
-                        arguments=event.get("data", {}).get("input", {}),
-                    ).model_dump()
+        except Exception as exc:  # noqa: BLE001 — surface any failure to the client
+            failed = True
+            logger.exception(
+                "chat_handle_message_failed",
+                session_id=session_id,
+                sid_present=bool(user_context.sid),
+            )
+            yield {"type": "error", "message": str(exc)}
 
-                elif kind == "on_tool_end":
-                    output = event.get("data", {}).get("output", "")
-                    if isinstance(output, ToolMessage):
-                        output = output.content
-                    yield ToolEndEvent(
-                        call_id=event.get("run_id", ""),
-                        result=str(output),
-                        success=True,
-                    ).model_dump()
+        yield {
+            "type": "done",
+            "tools_called": tools_called,
+            "data_quality": "low" if failed else "high",
+            "timestamp": _utcnow_rfc3339_z(),
+        }
 
-                elif kind == "on_chat_model_end":
-                    message = event.get("data", {}).get("output")
-                    if (
-                        isinstance(message, AIMessage)
-                        and message.content
-                        and not message.tool_calls
-                    ):
-                        blocks = parse_agent_output(str(message.content))
-                        for block in blocks:
-                            yield ContentBlockEvent(block=block.model_dump()).model_dump()
+    # ------------------------------------------------------------------ #
+    # Event translation
+    # ------------------------------------------------------------------ #
 
-        except Exception as exc:
-            logger.error("chat_error", error=str(exc), session_id=session_id)
-            yield ErrorEvent(
-                code="AGENT_ERROR",
-                message=str(exc),
-                suggestion="Try again or check service logs.",
-                request_id=request_id,
-            ).model_dump()
+    @staticmethod
+    def _translate_event(
+        event: dict[str, Any],
+        tools_called: list[str],
+    ) -> dict[str, Any] | None:
+        """Map one LangGraph v2 event to an SSE-schema dict, or None to skip."""
+        kind = event.get("event")
 
-        yield DoneEvent(request_id=request_id).model_dump()
+        if kind == "on_tool_start":
+            name = event.get("name") or "unknown"
+            args = event.get("data", {}).get("input") or {}
+            tools_called.append(name)
+            return {"type": "tool_call", "name": name, "arguments": args}
+
+        if kind == "on_chat_model_end":
+            message = event.get("data", {}).get("output")
+            if not isinstance(message, AIMessage):
+                return None
+            # Skip intermediate AI messages that exist only to call tools —
+            # only the final natural-language answer should reach the user.
+            if getattr(message, "tool_calls", None):
+                return None
+            content = message.content
+            if not content:
+                return None
+            text = content if isinstance(content, str) else str(content)
+            if not text.strip():
+                return None
+            return {"type": "content", "text": text}
+
+        # on_tool_end, on_chat_model_start, on_chain_*, etc. are swallowed.
+        return None
