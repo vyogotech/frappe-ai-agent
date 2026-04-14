@@ -5,8 +5,14 @@ from __future__ import annotations
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import create_react_agent
+
+
+def build_checkpointer() -> InMemorySaver:
+    """Build an in-memory checkpointer for the agent graph."""
+    return InMemorySaver()
 
 
 def create_agent_graph(

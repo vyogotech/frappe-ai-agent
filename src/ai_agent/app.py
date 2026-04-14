@@ -8,12 +8,11 @@ import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from ai_agent.agent.graph import create_agent_graph
+from ai_agent.agent.graph import build_checkpointer, create_agent_graph
 from ai_agent.agent.prompts import build_system_prompt
 from ai_agent.config import Settings
 from ai_agent.integrations.llm import create_llm
 from ai_agent.integrations.mcp import create_mcp_client
-from ai_agent.integrations.postgres import create_checkpointer
 from ai_agent.integrations.redis import RedisClient
 from ai_agent.middleware.rate_limit import RateLimiter
 from ai_agent.middleware.request_id import RequestIDMiddleware
@@ -41,63 +40,63 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         # Initialize integrations
         redis = RedisClient(url=settings.redis_url)
+        checkpointer = build_checkpointer()
 
-        async with create_checkpointer(settings.database_url) as checkpointer:
-            # MCP tools
-            mcp_client = create_mcp_client(settings)
-            tools = await mcp_client.get_tools()
-            logger.info("mcp_tools_loaded", count=len(tools))
+        # MCP tools
+        mcp_client = create_mcp_client(settings)
+        tools = await mcp_client.get_tools()
+        logger.info("mcp_tools_loaded", count=len(tools))
 
-            # LLM + Agent graph
-            llm = create_llm(settings)
-            system_prompt = build_system_prompt({})
-            agent_graph = create_agent_graph(
-                llm=llm,
-                tools=tools,
-                system_prompt=system_prompt,
-                checkpointer=checkpointer,
+        # LLM + Agent graph
+        llm = create_llm(settings)
+        system_prompt = build_system_prompt({})
+        agent_graph = create_agent_graph(
+            llm=llm,
+            tools=tools,
+            system_prompt=system_prompt,
+            checkpointer=checkpointer,
+        )
+
+        # Services
+        rate_limiter = RateLimiter(
+            redis=redis,
+            limit=settings.rate_limit_requests,
+            window_seconds=settings.rate_limit_window_seconds,
+        )
+        chat_service = ChatService(agent_graph=agent_graph)
+        health_service = HealthService(settings=settings, redis=redis)
+        session_service = SessionService(redis=redis)
+
+        # Register routes
+        app.include_router(
+            create_rest_router(settings=settings, health_service=health_service, tools=tools)
+        )
+        app.include_router(
+            create_ws_router(
+                chat_service=chat_service,
+                rate_limiter=rate_limiter,
+                jwt_secret=settings.jwt_secret,
+                jwt_algorithm=settings.jwt_algorithm,
+            )
+        )
+
+        # Store for access in tests/extensions
+        app.state.settings = settings
+        app.state.redis = redis
+        app.state.chat_service = chat_service
+        app.state.session_service = session_service
+
+        # OTEL
+        if settings.otel_endpoint:
+            create_tracer_provider(
+                endpoint=settings.otel_endpoint,
+                service_name=settings.otel_service_name,
             )
 
-            # Services
-            rate_limiter = RateLimiter(
-                redis=redis,
-                limit=settings.rate_limit_requests,
-                window_seconds=settings.rate_limit_window_seconds,
-            )
-            chat_service = ChatService(agent_graph=agent_graph)
-            health_service = HealthService(settings=settings, redis=redis)
-            session_service = SessionService(redis=redis)
+        logger.info("started", tools=len(tools))
+        yield
 
-            # Register routes
-            app.include_router(
-                create_rest_router(settings=settings, health_service=health_service, tools=tools)
-            )
-            app.include_router(
-                create_ws_router(
-                    chat_service=chat_service,
-                    rate_limiter=rate_limiter,
-                    jwt_secret=settings.jwt_secret,
-                    jwt_algorithm=settings.jwt_algorithm,
-                )
-            )
-
-            # Store for access in tests/extensions
-            app.state.settings = settings
-            app.state.redis = redis
-            app.state.chat_service = chat_service
-            app.state.session_service = session_service
-
-            # OTEL
-            if settings.otel_endpoint:
-                create_tracer_provider(
-                    endpoint=settings.otel_endpoint,
-                    service_name=settings.otel_service_name,
-                )
-
-            logger.info("started", tools=len(tools))
-            yield
-
-        # Shutdown (checkpointer connection closed by context manager above)
+        # Shutdown
         await redis.close()
         logger.info("stopped")
 
