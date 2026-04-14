@@ -20,3 +20,22 @@ def create_mcp_client(settings: Settings) -> MultiServerMCPClient:
             },
         }
     )
+
+
+def build_mcp_client_for_sid(settings: Settings, sid: str) -> MultiServerMCPClient:
+    """Return a new MCP client configured to forward the caller's Frappe sid.
+
+    Every call to this function returns a NEW client. Sharing clients across
+    requests would leak one user's sid into another user's tool calls.
+    """
+    if not sid or not sid.strip():
+        raise ValueError("build_mcp_client_for_sid requires a non-empty sid")
+    return MultiServerMCPClient(
+        {
+            "frappe": {
+                "url": settings.mcp_server_url,
+                "transport": "streamable_http",
+                "headers": {"Cookie": f"sid={sid}"},
+            }
+        }
+    )
