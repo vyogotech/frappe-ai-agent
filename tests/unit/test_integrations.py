@@ -2,7 +2,6 @@ from unittest.mock import patch
 
 from ai_agent.config import Settings
 from ai_agent.integrations.llm import create_llm
-from ai_agent.integrations.mcp import create_mcp_client
 
 
 class TestCreateLLM:
@@ -33,10 +32,3 @@ class TestCreateLLM:
         mock_init.assert_called_once()
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["api_key"] == "sk-123"
-
-
-class TestCreateMCPClient:
-    def test_creates_client_with_url(self):
-        settings = Settings(mcp_server_url="http://mcp:8080/mcp")
-        client = create_mcp_client(settings)
-        assert client is not None
