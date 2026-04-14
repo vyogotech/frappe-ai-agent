@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Environment
+.env
+
+# UV (uv.lock is committed for reproducible builds)
+
+# OS
+.DS_Store
+
+# Pytest
+.pytest_cache/
+
+# Coverage
+htmlcov/
+.coverage
+
+# Ruff
+.ruff_cache/
+
+# Database
+*.db
+
+# Eggs
+.eggs/
+
+# Local dev compose (contains machine-specific paths and credentials)
+docker-compose.dev.yml

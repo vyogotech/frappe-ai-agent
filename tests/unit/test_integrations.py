@@ -1,0 +1,35 @@
+from unittest.mock import patch
+
+from copilot_agent.config import Settings
+from copilot_agent.integrations.llm import create_llm
+from copilot_agent.integrations.mcp import create_mcp_client
+
+
+class TestCreateLLM:
+    @patch("copilot_agent.integrations.llm.init_chat_model")
+    def test_creates_model_with_settings(self, mock_init):
+        settings = Settings(jwt_secret="test")
+        create_llm(settings)
+        mock_init.assert_called_once_with(
+            "llama3.2:3b",
+            model_provider="openai",
+            base_url="http://localhost:11434/v1",
+            api_key=None,
+            temperature=0.7,
+            max_tokens=4096,
+        )
+
+    @patch("copilot_agent.integrations.llm.init_chat_model")
+    def test_passes_api_key_when_set(self, mock_init):
+        settings = Settings(jwt_secret="test", llm_api_key="sk-123")
+        create_llm(settings)
+        mock_init.assert_called_once()
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["api_key"] == "sk-123"
+
+
+class TestCreateMCPClient:
+    def test_creates_client_with_url(self):
+        settings = Settings(jwt_secret="test", mcp_server_url="http://mcp:8080/mcp")
+        client = create_mcp_client(settings)
+        assert client is not None

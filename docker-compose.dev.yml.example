@@ -1,0 +1,65 @@
+# Dev compose: MCP server + agent + postgres + redis
+# Copy to docker-compose.dev.yml and fill in the placeholder values.
+#
+# Prerequisites:
+#   1. Build the MCP server image first:
+#      git clone https://github.com/<org>/frappe-mcp-server && cd frappe-mcp-server
+#      docker build -t frappe-mcp-server:local .
+#   2. Generate an ERPNext API key/secret for your admin user:
+#      bench --site <site> execute frappe.core.doctype.user.user.generate_keys --args '["Administrator"]'
+
+services:
+  mcp:
+    image: frappe-mcp-server:local
+    ports:
+      - "18080:8080"   # legacy REST API
+      - "18081:8081"   # MCP protocol endpoint (POST /mcp)
+    volumes:
+      - YOUR_MCP_CONFIG_PATH:/app/config.yaml:ro  # absolute path to your config.yaml
+    environment:
+      ERPNEXT_BASE_URL: YOUR_ERPNEXT_BASE_URL     # e.g. http://host.docker.internal:8080
+      ERPNEXT_API_KEY: YOUR_ERPNEXT_API_KEY
+      ERPNEXT_API_SECRET: YOUR_ERPNEXT_API_SECRET
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: .
+    ports:
+      - "8484:8484"
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: copilot
+      POSTGRES_PASSWORD: copilot
+      POSTGRES_DB: copilot
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U copilot"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:

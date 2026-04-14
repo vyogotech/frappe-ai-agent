@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync --all-extras
+      - run: uv run ruff check src/ tests/
+      - run: uv run ruff format --check src/ tests/
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync --all-extras
+      - run: uv run pyright src/
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: copilot
+          POSTGRES_PASSWORD: copilot
+          POSTGRES_DB: copilot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U copilot"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync --all-extras
+      - run: uv run pytest tests/unit/ -v --cov=copilot_agent --cov-report=xml
+        env:
+          COPILOT_JWT_SECRET: test-secret
+      - uses: codecov/codecov-action@v4
+        with:
+          file: coverage.xml
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: returntocorp/semgrep-action@v1
+        with:
+          config: auto
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/build-push-action@v6
+        with:
+          push: false
+          tags: frappe-copilot-agent:test
