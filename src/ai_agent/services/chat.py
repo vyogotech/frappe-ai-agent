@@ -157,6 +157,12 @@ class ChatService:
             graph_input = {"messages": [HumanMessage(content=message)]}
             graph_config = {
                 "configurable": {"thread_id": session_id or "default"},
+                # Smaller local models (qwen3.5:9b, llama3.1:8b, ...) are
+                # prone to tool-call loops — they'll list the same doctype
+                # over and over exploring the schema. The LangGraph default
+                # of 25 trips before they converge. 50 is enough headroom
+                # without letting a truly-stuck agent run forever.
+                "recursion_limit": 50,
             }
 
             async for event in graph.astream_events(
