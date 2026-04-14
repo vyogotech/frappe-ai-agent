@@ -109,7 +109,10 @@ async def test_handle_message_yields_status_then_done_envelope():
         )
 
     assert len(events) >= 2
-    assert events[0]["type"] == "status"
+    # session is announced first so the frontend can remember the id
+    # before any chat activity starts.
+    assert events[0]["type"] == "session"
+    assert events[1]["type"] == "status"
     assert events[-1]["type"] == "done"
     assert events[-1]["tools_called"] == []
     assert "timestamp" in events[-1]
@@ -508,6 +511,77 @@ async def test_content_with_copilot_block_emits_content_block_events():
     assert [e for e in events if e["type"] == "content"] == []
     # Stream still terminates with done
     assert events[-1]["type"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_session_event_announces_created_session_id():
+    """When session_id is None the service creates one and immediately
+    emits a session event so the frontend can remember it."""
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    fake_history = MagicMock()
+    fake_history.create_session = AsyncMock(return_value="sess-created")
+    fake_history.save_message = AsyncMock(return_value="msg-1")
+    service._history = fake_history
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(return_value=[])
+    mock_graph = MagicMock()
+    mock_graph.astream_events = _StreamFactory([])
+
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.create_agent_graph", return_value=mock_graph),
+    ):
+        events = await _drain(
+            service.handle_message(
+                message="hi",
+                session_id=None,
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    session_events = [e for e in events if e["type"] == "session"]
+    assert len(session_events) == 1
+    assert session_events[0]["id"] == "sess-created"
+
+
+@pytest.mark.asyncio
+async def test_session_event_echoes_existing_session_id():
+    """When session_id is already known the service echoes it back so the
+    frontend can confirm continuity (and rehydrated UI state can bind)."""
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    fake_history = MagicMock()
+    fake_history.create_session = AsyncMock(return_value="should-not-use")
+    fake_history.save_message = AsyncMock(return_value="msg-1")
+    service._history = fake_history
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(return_value=[])
+    mock_graph = MagicMock()
+    mock_graph.astream_events = _StreamFactory([])
+
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.create_agent_graph", return_value=mock_graph),
+    ):
+        events = await _drain(
+            service.handle_message(
+                message="follow up",
+                session_id="sess-existing",
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    fake_history.create_session.assert_not_called()
+    session_events = [e for e in events if e["type"] == "session"]
+    assert len(session_events) == 1
+    assert session_events[0]["id"] == "sess-existing"
 
 
 @pytest.mark.asyncio
