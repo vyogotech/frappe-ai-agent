@@ -22,7 +22,7 @@ typecheck:
 	uv run pyright src/
 
 serve:
-	uv run uvicorn copilot_agent.app:create_app --factory --host 0.0.0.0 --port 8484 --reload
+	uv run uvicorn ai_agent.app:create_app --factory --host 0.0.0.0 --port 8484 --reload
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} +

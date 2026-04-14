@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "frappe-copilot-agent"
+name = "frappe-ai-agent"
 version = "0.1.0"
 description = "AI agent service for Frappe/ERPNext"
 requires-python = ">=3.12"
@@ -61,4 +61,4 @@ markers = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/copilot_agent"]
+packages = ["src/ai_agent"]
