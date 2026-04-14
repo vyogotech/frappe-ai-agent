@@ -42,6 +42,7 @@ def create_sse_router() -> APIRouter:
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
             },
         )

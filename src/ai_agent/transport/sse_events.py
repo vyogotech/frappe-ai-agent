@@ -34,4 +34,8 @@ def error_event(message: str) -> Event:
 
 
 def serialize(event: Event) -> bytes:
+    # Python json.dumps does not HTML-escape '<', '>', '&' the way Go's
+    # json.Marshal does. Byte-level consumers that round-trip through a Go
+    # server on the same schema may see diverging escapes for these chars.
+    # Decoded JSON objects are identical either way.
     return f"data: {json.dumps(event, separators=(',', ':'))}\n\n".encode()
