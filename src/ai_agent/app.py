@@ -8,13 +8,11 @@ import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from ai_agent.agent.graph import build_checkpointer, create_agent_graph
+from ai_agent.agent.graph import build_checkpointer
 from ai_agent.agent.prompts import build_system_prompt
 from ai_agent.config import Settings
 from ai_agent.integrations.llm import create_llm
-from ai_agent.integrations.mcp import create_mcp_client
 from ai_agent.integrations.redis import RedisClient
-from ai_agent.middleware.rate_limit import RateLimiter
 from ai_agent.middleware.request_id import RequestIDMiddleware
 from ai_agent.observability.logging import setup_logging
 from ai_agent.observability.tracing import create_tracer_provider
@@ -38,38 +36,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         logger.info("starting", port=settings.port, model=settings.llm_model)
 
-        # Initialize integrations
+        # Long-lived integrations
         redis = RedisClient(url=settings.redis_url)
         checkpointer = build_checkpointer()
-
-        # MCP tools
-        mcp_client = create_mcp_client(settings)
-        tools = await mcp_client.get_tools()
-        logger.info("mcp_tools_loaded", count=len(tools))
-
-        # LLM + Agent graph
         llm = create_llm(settings)
-        system_prompt = build_system_prompt({})
-        agent_graph = create_agent_graph(
-            llm=llm,
-            tools=tools,
-            system_prompt=system_prompt,
-            checkpointer=checkpointer,
-        )
 
-        # Services
-        rate_limiter = RateLimiter(
-            redis=redis,
-            limit=settings.rate_limit_requests,
-            window_seconds=settings.rate_limit_window_seconds,
+        # Services. ChatService builds its MCP client + agent graph per
+        # request using the caller's sid, so nothing tool-related happens at
+        # startup.
+        chat_service = ChatService(
+            settings=settings,
+            llm=llm,
+            checkpointer=checkpointer,
+            system_prompt_builder=build_system_prompt,
         )
-        chat_service = ChatService(agent_graph=agent_graph)
         health_service = HealthService(settings=settings, redis=redis)
         session_service = SessionService(redis=redis)
 
-        # Register routes
+        # Register routes. The /tools REST endpoint used to report the
+        # startup-loaded tool list; tools are now per-user, so we expose an
+        # empty list as a diagnostic stub. A future phase can re-scope it
+        # behind sid auth if needed.
         app.include_router(
-            create_rest_router(settings=settings, health_service=health_service, tools=tools)
+            create_rest_router(
+                settings=settings,
+                health_service=health_service,
+                tools=[],
+            )
         )
         app.include_router(create_sse_router())
 
@@ -86,7 +79,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 service_name=settings.otel_service_name,
             )
 
-        logger.info("started", tools=len(tools))
+        logger.info("started")
         yield
 
         # Shutdown
