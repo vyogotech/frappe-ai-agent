@@ -26,7 +26,7 @@ class PermissionDeniedError(Exception):
         )
 
 
-def is_permission_error(exc: BaseException) -> bool:
+def is_permission_error(exc: Exception) -> bool:
     """Heuristic: does this exception look like a Frappe permission denial?
 
     Checks (in order):
@@ -51,11 +51,16 @@ def is_permission_error(exc: BaseException) -> bool:
     return any(phrase in text for phrase in permission_phrases)
 
 
-def to_tool_result_message(exc: BaseException) -> str:
+def to_tool_result_message(exc: Exception) -> str:
     """Convert any exception into a string suitable for a ToolMessage content.
 
     The result is fed back to the LLM as the tool's output. It must be
     actionable and free of stack traces or internal details.
+
+    NOTE: signature must be annotated with `Exception` (not `BaseException`)
+    because LangGraph's ToolNode uses `_infer_handled_types` on this callable
+    to decide which exception classes to catch. BaseException is rejected as
+    "too broad" at registration time. See `langgraph/prebuilt/tool_node.py`.
     """
     if isinstance(exc, PermissionDeniedError):
         return (
