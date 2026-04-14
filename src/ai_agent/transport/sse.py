@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from ai_agent.middleware.sid import extract_user_context
 from ai_agent.transport.sse_events import serialize
 
 
@@ -22,8 +23,8 @@ def create_sse_router() -> APIRouter:
 
     @router.post("/api/v1/chat")
     async def chat(req: Request, body: ChatRequest):
-        sid = req.cookies.get("sid")
-        if not sid:
+        user_context = extract_user_context(req)
+        if user_context is None:
             raise HTTPException(status_code=401, detail="Missing sid cookie")
 
         chat_service = req.app.state.chat_service
@@ -33,7 +34,7 @@ def create_sse_router() -> APIRouter:
                 message=body.message,
                 session_id=body.session_id,
                 context=body.context,
-                user_context=sid,  # Phase 5 will replace this with a UserContext object
+                user_context=user_context,
             ):
                 yield serialize(event)
 
