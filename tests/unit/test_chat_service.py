@@ -336,3 +336,115 @@ async def test_handle_message_uses_session_id_as_thread_id():
         )
 
     assert captured["config"]["configurable"]["thread_id"] == "sess-42"
+
+
+@pytest.mark.asyncio
+async def test_handle_message_creates_session_when_session_id_is_none():
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    fake_history = MagicMock()
+    fake_history.create_session = AsyncMock(return_value="sess-42")
+    fake_history.save_message = AsyncMock(return_value="msg-1")
+    service._history = fake_history  # inject directly
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(return_value=[])
+    mock_graph = MagicMock()
+    mock_graph.astream_events = _StreamFactory([])
+
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.create_agent_graph", return_value=mock_graph),
+    ):
+        await _drain(
+            service.handle_message(
+                message="hello world",
+                session_id=None,
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    fake_history.create_session.assert_called_once()
+    create_call = fake_history.create_session.call_args
+    assert create_call.kwargs["sid"] == "abc123"
+    assert "hello world" in create_call.kwargs["title"]
+
+    # User message should be persisted
+    save_calls = fake_history.save_message.call_args_list
+    user_calls = [c for c in save_calls if c.kwargs.get("role") == "user"]
+    assert len(user_calls) == 1
+    assert user_calls[0].kwargs["session"] == "sess-42"
+    assert user_calls[0].kwargs["content"] == "hello world"
+
+
+@pytest.mark.asyncio
+async def test_handle_message_uses_provided_session_id_without_creating():
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    fake_history = MagicMock()
+    fake_history.create_session = AsyncMock(return_value="should-not-use")
+    fake_history.save_message = AsyncMock(return_value="msg-1")
+    service._history = fake_history
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(return_value=[])
+    mock_graph = MagicMock()
+    mock_graph.astream_events = _StreamFactory([])
+
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.create_agent_graph", return_value=mock_graph),
+    ):
+        await _drain(
+            service.handle_message(
+                message="follow up",
+                session_id="existing-sess",
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    fake_history.create_session.assert_not_called()
+    # User message attached to the existing session id
+    user_calls = [
+        c for c in fake_history.save_message.call_args_list
+        if c.kwargs.get("role") == "user"
+    ]
+    assert user_calls[0].kwargs["session"] == "existing-sess"
+
+
+@pytest.mark.asyncio
+async def test_handle_message_continues_when_history_writes_fail():
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    fake_history = MagicMock()
+    fake_history.create_session = AsyncMock(return_value=None)  # Frappe down
+    fake_history.save_message = AsyncMock(return_value=None)
+    service._history = fake_history
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(return_value=[])
+    mock_graph = MagicMock()
+    mock_graph.astream_events = _StreamFactory([])
+
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.create_agent_graph", return_value=mock_graph),
+    ):
+        events = await _drain(
+            service.handle_message(
+                message="hi",
+                session_id=None,
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    # Conversation must still finish cleanly with a done event
+    assert events[-1]["type"] == "done"
+    # And no error event was emitted just because Frappe was down
+    assert [e for e in events if e["type"] == "error"] == []

@@ -7,13 +7,20 @@ the MCP server so tool calls run under that Frappe user's permissions.
 
 Events yielded here must match the SSE schema in `transport.sse_events`:
 `status`, `tool_call`, `content`, `done`, `error`.
+
+Chat history is persisted best-effort to Frappe via `FrappeHistoryClient`:
+we create a session if none is supplied, record the user's message before
+the graph runs, and record the final assistant message when it finishes.
+History write failures are logged but never abort the conversation.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from typing import Any, Callable
+from uuid import uuid4
 
 import structlog
 from langchain_core.messages import AIMessage, HumanMessage
@@ -22,6 +29,7 @@ from ai_agent.agent.graph import create_agent_graph
 from ai_agent.agent.prompts import build_system_prompt
 from ai_agent.agent.tool_errors import to_tool_result_message
 from ai_agent.config import Settings
+from ai_agent.integrations.frappe_history import FrappeHistoryClient
 from ai_agent.integrations.mcp import build_mcp_client_for_sid
 from ai_agent.middleware.sid import UserContext
 
@@ -30,10 +38,20 @@ logger = structlog.get_logger(__name__)
 
 SystemPromptBuilder = Callable[[dict[str, Any]], str]
 
+_TITLE_MAX_LEN = 60
+
 
 def _utcnow_rfc3339_z() -> str:
     """RFC3339 timestamp ending in `Z` (matches frappe-mcp-server format)."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _derive_title(message: str) -> str:
+    """First ~60 chars of the user's message, trimmed, for session title."""
+    stripped = message.strip()
+    if len(stripped) <= _TITLE_MAX_LEN:
+        return stripped
+    return stripped[:_TITLE_MAX_LEN]
 
 
 class ChatService:
@@ -50,11 +68,13 @@ class ChatService:
         llm: Any,
         checkpointer: Any,
         system_prompt_builder: SystemPromptBuilder = build_system_prompt,
+        history: FrappeHistoryClient | None = None,
     ) -> None:
         self._settings = settings
         self._llm = llm
         self._checkpointer = checkpointer
         self._build_system_prompt = system_prompt_builder
+        self._history = history or FrappeHistoryClient(base_url=settings.frappe_url)
 
     async def handle_message(
         self,
@@ -66,7 +86,37 @@ class ChatService:
     ) -> AsyncIterator[dict[str, Any]]:
         """Run the graph for one message, yielding SSE-schema events."""
         tools_called: list[str] = []
+        tool_invocations: list[dict[str, Any]] = []
+        assistant_text_parts: list[str] = []
         failed = False
+        error_message: str | None = None
+
+        # Resolve / create the history session BEFORE the graph runs so the
+        # user's message and the eventual assistant reply can both be stored.
+        # If Frappe is unreachable, fall back to a client-side id so the rest
+        # of the request still works; the history is just lost for this turn.
+        if session_id is None:
+            created = await self._history.create_session(
+                sid=user_context.sid,
+                title=_derive_title(message),
+                context_json=json.dumps(context or {}),
+            )
+            if created is None:
+                session_id = f"tmp-{uuid4().hex[:8]}"
+                logger.warning(
+                    "chat_history_session_create_failed_using_tmp",
+                    session_id=session_id,
+                )
+            else:
+                session_id = created
+
+        # Persist the user's message. Best-effort; failures do not abort.
+        await self._history.save_message(
+            sid=user_context.sid,
+            session=session_id,
+            role="user",
+            content=message,
+        )
 
         try:
             yield {"type": "status", "message": "loading tools..."}
@@ -113,18 +163,43 @@ class ChatService:
                 config=graph_config,
                 version="v2",
             ):
-                translated = self._translate_event(event, tools_called)
+                translated = self._translate_event(event, tools_called, tool_invocations)
                 if translated is not None:
+                    if translated["type"] == "content":
+                        assistant_text_parts.append(translated["text"])
                     yield translated
 
         except Exception as exc:  # noqa: BLE001 — surface any failure to the client
             failed = True
+            error_message = str(exc)
             logger.exception(
                 "chat_handle_message_failed",
                 session_id=session_id,
                 sid_present=bool(user_context.sid),
             )
-            yield {"type": "error", "message": str(exc)}
+            yield {"type": "error", "message": error_message}
+
+        # Persist the final assistant message (success or error). Best-effort:
+        # if this fails it is logged inside the client and we still emit `done`.
+        assistant_content = (
+            f"[error] {error_message}"
+            if failed
+            else "".join(assistant_text_parts)
+        )
+        tool_args_json: str | None = None
+        if tool_invocations:
+            try:
+                tool_args_json = json.dumps(tool_invocations)
+            except (TypeError, ValueError):
+                # Arguments weren't JSON-serialisable — drop them silently.
+                tool_args_json = None
+        await self._history.save_message(
+            sid=user_context.sid,
+            session=session_id,
+            role="assistant",
+            content=assistant_content,
+            tool_args_json=tool_args_json,
+        )
 
         yield {
             "type": "done",
@@ -141,6 +216,7 @@ class ChatService:
     def _translate_event(
         event: dict[str, Any],
         tools_called: list[str],
+        tool_invocations: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
         """Map one LangGraph v2 event to an SSE-schema dict, or None to skip."""
         kind = event.get("event")
@@ -149,6 +225,7 @@ class ChatService:
             name = event.get("name") or "unknown"
             args = event.get("data", {}).get("input") or {}
             tools_called.append(name)
+            tool_invocations.append({"name": name, "args": args})
             return {"type": "tool_call", "name": name, "arguments": args}
 
         if kind == "on_chat_model_end":
