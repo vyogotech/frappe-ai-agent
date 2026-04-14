@@ -448,3 +448,106 @@ async def test_handle_message_continues_when_history_writes_fail():
     assert events[-1]["type"] == "done"
     # And no error event was emitted just because Frappe was down
     assert [e for e in events if e["type"] == "error"] == []
+
+
+@pytest.mark.asyncio
+async def test_content_with_copilot_block_emits_content_block_events():
+    """When the LLM's final message contains <copilot-block> tags, the
+    service must emit one content_block event per block (including text
+    blocks for prose between tags), preserving order. A plain `content`
+    event is NOT emitted in this case."""
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    final_text = (
+        "Here are the users:\n"
+        '<copilot-block type="table">'
+        '{"title": "Users", "columns": [{"key": "name", "label": "Name"}], '
+        '"rows": [{"values": {"name": "Admin"}}]}'
+        "</copilot-block>\n"
+        "That's 1 user."
+    )
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(return_value=[])
+    mock_graph = MagicMock()
+    mock_graph.astream_events = _StreamFactory(
+        [
+            {
+                "event": "on_chat_model_end",
+                "data": {"output": AIMessage(content=final_text)},
+            }
+        ]
+    )
+
+    fake_history = MagicMock()
+    fake_history.create_session = AsyncMock(return_value="sess-1")
+    fake_history.save_message = AsyncMock(return_value="msg-1")
+    service._history = fake_history
+
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.create_agent_graph", return_value=mock_graph),
+    ):
+        events = await _drain(
+            service.handle_message(
+                message="list users",
+                session_id="sess-1",
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    block_events = [e for e in events if e["type"] == "content_block"]
+    assert len(block_events) == 3, f"expected 3 blocks, got {block_events}"
+    assert block_events[0]["block"] == {"type": "text", "content": "Here are the users:"}
+    assert block_events[1]["block"]["type"] == "table"
+    assert block_events[1]["block"]["title"] == "Users"
+    assert block_events[2]["block"] == {"type": "text", "content": "That's 1 user."}
+    # No plain content event when blocks are present
+    assert [e for e in events if e["type"] == "content"] == []
+    # Stream still terminates with done
+    assert events[-1]["type"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_content_without_blocks_keeps_single_content_event():
+    """Plain-text responses (no <copilot-block> tags) still emit exactly
+    one `content` event — block parsing is opt-in by the LLM's output."""
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(return_value=[])
+    mock_graph = MagicMock()
+    mock_graph.astream_events = _StreamFactory(
+        [
+            {
+                "event": "on_chat_model_end",
+                "data": {"output": AIMessage(content="Hello! How can I help?")},
+            }
+        ]
+    )
+
+    fake_history = MagicMock()
+    fake_history.create_session = AsyncMock(return_value="sess-1")
+    fake_history.save_message = AsyncMock(return_value="msg-1")
+    service._history = fake_history
+
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.create_agent_graph", return_value=mock_graph),
+    ):
+        events = await _drain(
+            service.handle_message(
+                message="hi",
+                session_id="sess-1",
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    content_events = [e for e in events if e["type"] == "content"]
+    assert len(content_events) == 1
+    assert content_events[0]["text"] == "Hello! How can I help?"
+    assert [e for e in events if e["type"] == "content_block"] == []

@@ -20,6 +20,16 @@ def content_event(text: str) -> Event:
     return {"type": "content", "text": text}
 
 
+def content_block_event(block: dict[str, Any]) -> Event:
+    """A structured block extracted from the LLM's response.
+
+    Emitted for each <copilot-block> tag the LLM produces, plus a text
+    block for each plain-text segment between them. Clients push these
+    into message.blocks in arrival order, preserving interleaving.
+    """
+    return {"type": "content_block", "block": block}
+
+
 def done_event(tools_called: list[str], data_quality: str, timestamp: str) -> Event:
     return {
         "type": "done",

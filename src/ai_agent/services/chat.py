@@ -25,6 +25,7 @@ from uuid import uuid4
 import structlog
 from langchain_core.messages import AIMessage, HumanMessage
 
+from ai_agent.agent.block_parser import parse_blocks
 from ai_agent.agent.graph import create_agent_graph
 from ai_agent.agent.prompts import build_system_prompt
 from ai_agent.agent.tool_errors import to_tool_result_message
@@ -164,10 +165,25 @@ class ChatService:
                 version="v2",
             ):
                 translated = self._translate_event(event, tools_called, tool_invocations)
-                if translated is not None:
-                    if translated["type"] == "content":
-                        assistant_text_parts.append(translated["text"])
+                if translated is None:
+                    continue
+                if translated["type"] != "content":
                     yield translated
+                    continue
+                # Content events may carry inlined <copilot-block> tags.
+                # Parse into an ordered list of blocks. If the text has at
+                # least one real block, emit them as content_block events so
+                # the frontend can render each via its block component. Pure
+                # prose (no tags) is a single text block — fall back to a
+                # normal content event so simple answers keep the plain path.
+                assistant_text_parts.append(translated["text"])
+                parsed = parse_blocks(translated["text"])
+                has_real_blocks = any(b["type"] != "text" for b in parsed)
+                if not has_real_blocks:
+                    yield translated
+                    continue
+                for block in parsed:
+                    yield {"type": "content_block", "block": block}
 
         except Exception as exc:  # noqa: BLE001 — surface any failure to the client
             failed = True
