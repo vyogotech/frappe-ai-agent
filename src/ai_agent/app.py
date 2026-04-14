@@ -102,7 +102,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         logger.info("stopped")
 
     app = FastAPI(
-        title="Frappe Copilot Agent",
+        title="Frappe AI Agent",
         version="0.1.0",
         lifespan=lifespan,
     )
