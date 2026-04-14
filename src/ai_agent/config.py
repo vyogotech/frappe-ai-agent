@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     # MCP
     mcp_server_url: str = "http://localhost:8080/mcp"
 
+    # Frappe URL for chat history persistence
+    frappe_url: str = "http://localhost:8000"
+
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 
