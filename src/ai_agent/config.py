@@ -29,9 +29,6 @@ class Settings(BaseSettings):
     # Frappe URL for chat history persistence
     frappe_url: str = "http://localhost:8000"
 
-    # Redis
-    redis_url: str = "redis://localhost:6379/0"
-
     # Observability
     otel_endpoint: str = ""
     otel_service_name: str = "frappe-ai-agent"

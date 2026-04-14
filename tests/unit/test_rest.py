@@ -18,7 +18,6 @@ def settings():
 def health_service():
     mock = AsyncMock(spec=HealthService)
     mock.check_all.return_value = {
-        "redis": {"ok": True},
         "mcp": {"ok": True},
         "llm": {"ok": True},
         "healthy": True,
@@ -50,7 +49,8 @@ class TestHealthEndpoint:
         resp = client.get("/health?detail=true")
         assert resp.status_code == 200
         data = resp.json()
-        assert "redis" in data
+        assert "mcp" in data
+        assert "llm" in data
 
 
 class TestConfigEndpoint:

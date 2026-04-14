@@ -12,13 +12,11 @@ from ai_agent.agent.graph import build_checkpointer
 from ai_agent.agent.prompts import build_system_prompt
 from ai_agent.config import Settings
 from ai_agent.integrations.llm import create_llm
-from ai_agent.integrations.redis import RedisClient
 from ai_agent.middleware.request_id import RequestIDMiddleware
 from ai_agent.observability.logging import setup_logging
 from ai_agent.observability.tracing import create_tracer_provider
 from ai_agent.services.chat import ChatService
 from ai_agent.services.health import HealthService
-from ai_agent.services.session import SessionService
 from ai_agent.transport.rest import create_rest_router
 from ai_agent.transport.sse import create_sse_router
 
@@ -36,8 +34,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         logger.info("starting", port=settings.port, model=settings.llm_model)
 
-        # Long-lived integrations
-        redis = RedisClient(url=settings.redis_url)
         checkpointer = build_checkpointer()
         llm = create_llm(settings)
 
@@ -50,8 +46,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             checkpointer=checkpointer,
             system_prompt_builder=build_system_prompt,
         )
-        health_service = HealthService(settings=settings, redis=redis)
-        session_service = SessionService(redis=redis)
+        health_service = HealthService(settings=settings)
 
         # Register routes. The /tools REST endpoint used to report the
         # startup-loaded tool list; tools are now per-user, so we expose an
@@ -68,9 +63,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         # Store for access in tests/extensions
         app.state.settings = settings
-        app.state.redis = redis
         app.state.chat_service = chat_service
-        app.state.session_service = session_service
 
         # OTEL
         if settings.otel_endpoint:
@@ -82,8 +75,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         logger.info("started")
         yield
 
-        # Shutdown
-        await redis.close()
         logger.info("stopped")
 
     app = FastAPI(

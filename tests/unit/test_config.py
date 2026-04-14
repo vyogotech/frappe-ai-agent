@@ -14,7 +14,6 @@ class TestSettings:
         assert settings.llm_max_tokens == 4096
         assert settings.mcp_server_url == "http://localhost:8080/mcp"
         assert settings.frappe_url == "http://localhost:8000"
-        assert settings.redis_url == "redis://localhost:6379/0"
         assert settings.log_level == "info"
         assert settings.log_format == "json"
         assert settings.otel_endpoint == ""
