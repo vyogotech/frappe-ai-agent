@@ -22,6 +22,7 @@ from ai_agent.services.chat import ChatService
 from ai_agent.services.health import HealthService
 from ai_agent.services.session import SessionService
 from ai_agent.transport.rest import create_rest_router
+from ai_agent.transport.sse import create_sse_router
 from ai_agent.transport.websocket import create_ws_router
 
 logger = structlog.get_logger()
@@ -79,6 +80,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 jwt_algorithm=settings.jwt_algorithm,
             )
         )
+        app.include_router(create_sse_router())
 
         # Store for access in tests/extensions
         app.state.settings = settings
