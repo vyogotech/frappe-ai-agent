@@ -20,10 +20,10 @@ class Settings(BaseSettings):
     jwt_expiry_hours: int = 24
 
     # LLM
-    llm_provider: str = "openai"
-    llm_base_url: str = "http://localhost:11434/v1"
+    llm_provider: str = "ollama"
+    llm_base_url: str = "http://localhost:11434"
     llm_api_key: str = ""
-    llm_model: str = "llama3.2:3b"
+    llm_model: str = "qwen3.5:9b"
     llm_temperature: float = 0.7
     llm_max_tokens: int = 4096
 

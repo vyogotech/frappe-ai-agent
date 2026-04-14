@@ -58,7 +58,7 @@ class TestConfigEndpoint:
         resp = client.get("/config")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["llm_model"] == "llama3.2:3b"
+        assert data["llm_model"] == "qwen3.5:9b"
         assert "jwt_secret" not in data
 
 

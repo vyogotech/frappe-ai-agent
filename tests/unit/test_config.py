@@ -10,9 +10,9 @@ class TestSettings:
         assert settings.host == "0.0.0.0"
         assert settings.port == 8484
         assert settings.workers == 4
-        assert settings.llm_provider == "openai"
-        assert settings.llm_base_url == "http://localhost:11434/v1"
-        assert settings.llm_model == "llama3.2:3b"
+        assert settings.llm_provider == "ollama"
+        assert settings.llm_base_url == "http://localhost:11434"
+        assert settings.llm_model == "qwen3.5:9b"
         assert settings.llm_temperature == 0.7
         assert settings.llm_max_tokens == 4096
         assert settings.mcp_server_url == "http://localhost:8080/mcp"
