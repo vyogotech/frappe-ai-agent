@@ -6,20 +6,25 @@ import respx
 
 from ai_agent.integrations.frappe_history import FrappeHistoryClient
 
-_CSRF_URL = "http://frappe:8000/api/method/frappe.auth.get_logged_user"
+_CSRF_URL = "http://frappe:8000/app"
 _SESSION_URL = "http://frappe:8000/api/resource/AI Chat Session"
 _MESSAGE_URL = "http://frappe:8000/api/resource/AI Chat Message"
-_FAKE_CSRF = "csrf-abc123"
+_FAKE_CSRF = "abc123def456789abcdef012345"
+
+
+def _csrf_page(token: str = _FAKE_CSRF) -> str:
+    """A minimal /app HTML response that embeds the csrf_token JS variable."""
+    return (
+        "<!DOCTYPE html><html><head><script>"
+        f'csrf_token = "{token}";'
+        "</script></head><body></body></html>"
+    )
 
 
 def _mock_csrf_ok() -> None:
-    """Respond to the CSRF GET with a fresh token in the response header."""
+    """Respond to the /app GET with a page containing the csrf_token."""
     respx.get(_CSRF_URL).mock(
-        return_value=httpx.Response(
-            200,
-            json={"message": "Administrator"},
-            headers={"X-Frappe-CSRF-Token": _FAKE_CSRF},
-        )
+        return_value=httpx.Response(200, text=_csrf_page())
     )
 
 
@@ -110,20 +115,12 @@ async def test_csrf_token_is_refetched_per_sid():
 async def test_write_retried_once_on_csrf_error():
     """If the first POST returns a CSRF error, the client should refresh
     its token and retry the write exactly once."""
-    # First CSRF fetch returns token A. A second fetch (after invalidation)
-    # returns token B. The POST rejects token A with CSRF error, accepts B.
+    # First CSRF fetch returns token-a. A second fetch (after invalidation)
+    # returns token-b. The POST rejects token-a with CSRF error, accepts b.
     csrf_route = respx.get(_CSRF_URL).mock(
         side_effect=[
-            httpx.Response(
-                200,
-                json={"message": "Administrator"},
-                headers={"X-Frappe-CSRF-Token": "token-a"},
-            ),
-            httpx.Response(
-                200,
-                json={"message": "Administrator"},
-                headers={"X-Frappe-CSRF-Token": "token-b"},
-            ),
+            httpx.Response(200, text=_csrf_page("aaaaaaaa11111111")),
+            httpx.Response(200, text=_csrf_page("bbbbbbbb22222222")),
         ]
     )
     post_route = respx.post(_MESSAGE_URL).mock(
@@ -147,7 +144,7 @@ async def test_write_retried_once_on_csrf_error():
     assert post_route.call_count == 2
     # The retry must use the fresh token, not the stale one.
     second_post = post_route.calls[1].request
-    assert second_post.headers["X-Frappe-CSRF-Token"] == "token-b"
+    assert second_post.headers["X-Frappe-CSRF-Token"] == "bbbbbbbb22222222"
 
 
 @pytest.mark.asyncio
@@ -207,9 +204,32 @@ async def test_save_message_forwards_optional_tool_fields():
 @pytest.mark.asyncio
 @respx.mock
 async def test_write_proceeds_without_token_when_csrf_fetch_fails():
-    """If Frappe's get_logged_user is down, the client should still try
+    """If Frappe's /app page is unreachable, the client should still try
     to POST (Frappe may reject with 400, which becomes a None return)."""
     respx.get(_CSRF_URL).mock(return_value=httpx.Response(500))
+    respx.post(_MESSAGE_URL).mock(
+        return_value=httpx.Response(200, json={"data": {"name": "msg-1"}})
+    )
+    client = FrappeHistoryClient(base_url="http://frappe:8000")
+
+    name = await client.save_message(
+        sid="abc", session="s", role="user", content="hi"
+    )
+
+    assert name == "msg-1"
+    post = next(c.request for c in respx.calls if c.request.method == "POST")
+    assert "X-Frappe-CSRF-Token" not in post.headers
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_write_proceeds_without_token_when_csrf_not_in_html():
+    """If /app returns 200 but the HTML has no csrf_token JS variable,
+    the client should still attempt the POST (some Frappe versions may
+    omit it in certain contexts)."""
+    respx.get(_CSRF_URL).mock(
+        return_value=httpx.Response(200, text="<html><body>No token here</body></html>")
+    )
     respx.post(_MESSAGE_URL).mock(
         return_value=httpx.Response(200, json={"data": {"name": "msg-1"}})
     )
