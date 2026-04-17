@@ -182,7 +182,7 @@ class ChatService:
                 if translated["type"] != "content":
                     yield translated
                     continue
-                # Content events may carry inlined <copilot-block> tags.
+                # Content events may carry inlined <ai-block> tags.
                 # Parse into an ordered list of blocks. If the text has at
                 # least one real block, emit them as content_block events so
                 # the frontend can render each via its block component. Pure

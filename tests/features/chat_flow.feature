@@ -1,5 +1,5 @@
 Feature: Chat Flow
-  As a Frappe Copilot user
+  As a Frappe AI user
   I want to ask questions about my ERPNext data
   So that I can get structured visual answers
 

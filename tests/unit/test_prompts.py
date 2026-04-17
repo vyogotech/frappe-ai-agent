@@ -4,7 +4,7 @@ from ai_agent.agent.prompts import build_system_prompt
 class TestBuildSystemPrompt:
     def test_no_context(self):
         prompt = build_system_prompt({})
-        assert "Frappe Copilot" in prompt
+        assert "Frappe AI" in prompt
         assert "no specific page" in prompt
 
     def test_with_doctype_and_docname(self):
