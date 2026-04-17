@@ -1,1 +1,1 @@
-"""Cross-cutting observability: logging, tracing, metrics."""
+"""Cross-cutting observability: logging and tracing."""
