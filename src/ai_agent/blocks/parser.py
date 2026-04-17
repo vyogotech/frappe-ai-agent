@@ -29,7 +29,7 @@ _BLOCK_TYPE_MAP: dict[str, type[ContentBlock]] = {
 }
 
 _BLOCK_PATTERN = re.compile(
-    r"<copilot-block\s+type=\"(\w+)\">\s*(.*?)\s*</copilot-block>",
+    r"<ai-block\s+type=\"(\w+)\">\s*(.*?)\s*</ai-block>",
     re.DOTALL,
 )
 

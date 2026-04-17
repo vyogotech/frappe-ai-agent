@@ -66,7 +66,7 @@ async def test_handle_message_builds_mcp_client_with_caller_sid():
     mock_graph.astream_events = _StreamFactory([])
 
     with (
-        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client) as mock_builder,
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client) as mock_builder,  # noqa: E501
         patch("ai_agent.services.chat.create_agent_graph", return_value=mock_graph),
     ):
         await _drain(
@@ -454,8 +454,8 @@ async def test_handle_message_continues_when_history_writes_fail():
 
 
 @pytest.mark.asyncio
-async def test_content_with_copilot_block_emits_content_block_events():
-    """When the LLM's final message contains <copilot-block> tags, the
+async def test_content_with_ai_block_emits_content_block_events():
+    """When the LLM's final message contains <ai-block> tags, the
     service must emit one content_block event per block (including text
     blocks for prose between tags), preserving order. A plain `content`
     event is NOT emitted in this case."""
@@ -464,10 +464,10 @@ async def test_content_with_copilot_block_emits_content_block_events():
 
     final_text = (
         "Here are the users:\n"
-        '<copilot-block type="table">'
+        '<ai-block type="table">'
         '{"title": "Users", "columns": [{"key": "name", "label": "Name"}], '
         '"rows": [{"values": {"name": "Admin"}}]}'
-        "</copilot-block>\n"
+        "</ai-block>\n"
         "That's 1 user."
     )
 
@@ -586,7 +586,7 @@ async def test_session_event_echoes_existing_session_id():
 
 @pytest.mark.asyncio
 async def test_content_without_blocks_keeps_single_content_event():
-    """Plain-text responses (no <copilot-block> tags) still emit exactly
+    """Plain-text responses (no <ai-block> tags) still emit exactly
     one `content` event — block parsing is opt-in by the LLM's output."""
     service = _make_service()
     user_context = UserContext(sid="abc123")

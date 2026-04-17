@@ -1,5 +1,5 @@
 Feature: Error Handling
-  As a Frappe Copilot user
+  As a Frappe AI user
   I want graceful error handling
   So that I always get a useful response
 

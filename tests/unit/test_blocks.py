@@ -128,9 +128,9 @@ class TestValidateBlock:
 class TestParseBlocks:
     def test_single_block(self):
         text = (
-            '<copilot-block type="kpi">'
+            '<ai-block type="kpi">'
             '{"metrics": [{"label": "Rev", "value": 100}]}'
-            "</copilot-block>"
+            "</ai-block>"
         )
         blocks = parse_blocks(text)
         assert len(blocks) == 1
@@ -147,20 +147,20 @@ class TestParseBlocks:
         assert len(blocks) == 0
 
     def test_unknown_block_type(self):
-        text = '<copilot-block type="unknown">{"data": 1}</copilot-block>'
+        text = '<ai-block type="unknown">{"data": 1}</ai-block>'
         blocks = parse_blocks(text)
         assert len(blocks) == 1
         assert blocks[0].type == "text"
         assert "Unknown block type" in blocks[0].content
 
     def test_malformed_json(self):
-        text = '<copilot-block type="kpi">{bad json}</copilot-block>'
+        text = '<ai-block type="kpi">{bad json}</ai-block>'
         blocks = parse_blocks(text)
         assert len(blocks) == 1
         assert blocks[0].content == "[Could not render block]"
 
     def test_text_with_blocks(self):
-        text = 'Before <copilot-block type="text">{"content": "inside"}</copilot-block> After'
+        text = 'Before <ai-block type="text">{"content": "inside"}</ai-block> After'
         blocks = parse_blocks(text)
         assert len(blocks) == 3
         assert blocks[0].content == "Before"
@@ -181,7 +181,7 @@ class TestParseBlocks:
                 },
             }
         )
-        text = f'<copilot-block type="chart">{payload}</copilot-block>'
+        text = f'<ai-block type="chart">{payload}</ai-block>'
         blocks = parse_blocks(text)
         assert len(blocks) == 1
         assert blocks[0].type == "chart"
