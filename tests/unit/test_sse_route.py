@@ -40,12 +40,15 @@ async def test_sse_chat_route_missing_sid_returns_401():
 
 async def test_sse_chat_route_with_sid_returns_event_stream():
     app = _build_app()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        cookies={"sid": "valid-sid"},
+    ) as ac:
         response = await ac.post(
             "/api/v1/chat",
             json={"message": "hello"},
             headers={"Accept": "text/event-stream"},
-            cookies={"sid": "valid-sid"},
         )
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")

@@ -24,6 +24,8 @@ from uuid import uuid4
 
 import structlog
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.runnables import RunnableConfig
+from langchain_core.runnables.schema import StreamEvent
 
 from ai_agent.agent.graph import create_agent_graph
 from ai_agent.agent.prompts import build_system_prompt
@@ -161,7 +163,7 @@ class ChatService:
             yield {"type": "status", "message": "thinking..."}
 
             graph_input = {"messages": [HumanMessage(content=message)]}
-            graph_config = {
+            graph_config: RunnableConfig = {
                 "configurable": {"thread_id": session_id or "default"},
                 # Smaller local models (qwen3.5:9b, llama3.1:8b, ...) are
                 # prone to tool-call loops — they'll list the same doctype
@@ -238,7 +240,7 @@ class ChatService:
 
     @staticmethod
     def _translate_event(
-        event: dict[str, Any],
+        event: StreamEvent,
         tools_called: list[str],
         tool_invocations: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
