@@ -112,7 +112,7 @@ class FrappeHistoryClient:
                     logger.warning("frappe csrf token not found in /app response")
                     return None
                 return match.group(1)
-        except Exception as exc:  # noqa: BLE001 — swallow, caller logs context
+        except Exception as exc:
             logger.warning("frappe csrf fetch failed: %s", exc)
             return None
 
@@ -156,7 +156,7 @@ class FrappeHistoryClient:
 
             response.raise_for_status()
             return response.json()["data"]["name"]
-        except Exception as exc:  # noqa: BLE001 — history must never abort the conversation
+        except Exception as exc:
             logger.warning("frappe history write failed (%s): %s", kind, exc)
             return None
 
@@ -165,6 +165,6 @@ def _looks_like_csrf_error(response: httpx.Response) -> bool:
     """Best-effort check for a Frappe CSRFTokenError response body."""
     try:
         text = response.text.lower()
-    except Exception:  # noqa: BLE001
+    except Exception:
         return False
     return "csrf" in text

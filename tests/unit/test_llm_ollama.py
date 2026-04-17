@@ -1,8 +1,9 @@
 from unittest.mock import patch
 
+from langchain_ollama import ChatOllama
+
 from ai_agent.config import Settings
 from ai_agent.integrations.llm import create_llm
-from langchain_ollama import ChatOllama
 
 
 def test_create_llm_uses_explicit_ollama_branch_not_init_chat_model():

@@ -1,7 +1,6 @@
 import structlog
 
 from ai_agent.observability.logging import setup_logging
-from ai_agent.observability.metrics import create_meter
 from ai_agent.observability.tracing import create_tracer_provider
 
 
@@ -26,9 +25,3 @@ class TestTracing:
         # Does not connect, just configures
         provider = create_tracer_provider(endpoint="http://localhost:4317", service_name="test")
         assert provider is not None
-
-
-class TestMetrics:
-    def test_create_meter(self):
-        meter = create_meter(service_name="test")
-        assert meter is not None

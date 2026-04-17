@@ -17,18 +17,18 @@ History write failures are logged but never abort the conversation.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
-from datetime import datetime, timezone
-from typing import Any, Callable
+from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 import structlog
 from langchain_core.messages import AIMessage, HumanMessage
 
-from ai_agent.agent.block_parser import parse_blocks
 from ai_agent.agent.graph import create_agent_graph
 from ai_agent.agent.prompts import build_system_prompt
 from ai_agent.agent.tool_errors import to_tool_result_message
+from ai_agent.blocks.parser import parse_blocks
 from ai_agent.config import Settings
 from ai_agent.integrations.frappe_history import FrappeHistoryClient
 from ai_agent.integrations.mcp import build_mcp_client_for_sid
@@ -44,7 +44,7 @@ _TITLE_MAX_LEN = 60
 
 def _utcnow_rfc3339_z() -> str:
     """RFC3339 timestamp ending in `Z` (matches frappe-mcp-server format)."""
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _derive_title(message: str) -> str:
@@ -190,14 +190,14 @@ class ChatService:
                 # normal content event so simple answers keep the plain path.
                 assistant_text_parts.append(translated["text"])
                 parsed = parse_blocks(translated["text"])
-                has_real_blocks = any(b["type"] != "text" for b in parsed)
+                has_real_blocks = any(b.type != "text" for b in parsed)
                 if not has_real_blocks:
                     yield translated
                     continue
                 for block in parsed:
-                    yield {"type": "content_block", "block": block}
+                    yield {"type": "content_block", "block": block.model_dump()}
 
-        except Exception as exc:  # noqa: BLE001 — surface any failure to the client
+        except Exception as exc:
             failed = True
             error_message = str(exc)
             logger.exception(
