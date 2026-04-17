@@ -127,11 +127,7 @@ class TestValidateBlock:
 
 class TestParseBlocks:
     def test_single_block(self):
-        text = (
-            '<ai-block type="kpi">'
-            '{"metrics": [{"label": "Rev", "value": 100}]}'
-            "</ai-block>"
-        )
+        text = '<ai-block type="kpi">{"metrics": [{"label": "Rev", "value": 100}]}</ai-block>'
         blocks = parse_blocks(text)
         assert len(blocks) == 1
         assert blocks[0].type == "kpi"

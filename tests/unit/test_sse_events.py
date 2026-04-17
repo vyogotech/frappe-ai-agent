@@ -13,7 +13,9 @@ def test_serialize_content_event():
 
 def test_serialize_tool_call_event():
     event = {"type": "tool_call", "name": "list_invoices", "arguments": {"status": "unpaid"}}
-    expected = b'data: {"type":"tool_call","name":"list_invoices","arguments":{"status":"unpaid"}}\n\n'  # noqa: E501
+    expected = (
+        b'data: {"type":"tool_call","name":"list_invoices","arguments":{"status":"unpaid"}}\n\n'
+    )
     assert serialize(event) == expected
 
 

@@ -23,9 +23,7 @@ def _csrf_page(token: str = _FAKE_CSRF) -> str:
 
 def _mock_csrf_ok() -> None:
     """Respond to the /app GET with a page containing the csrf_token."""
-    respx.get(_CSRF_URL).mock(
-        return_value=httpx.Response(200, text=_csrf_page())
-    )
+    respx.get(_CSRF_URL).mock(return_value=httpx.Response(200, text=_csrf_page()))
 
 
 @pytest.mark.asyncio
@@ -135,9 +133,7 @@ async def test_write_retried_once_on_csrf_error():
     )
 
     client = FrappeHistoryClient(base_url="http://frappe:8000")
-    name = await client.save_message(
-        sid="abc", session="s", role="user", content="hi"
-    )
+    name = await client.save_message(sid="abc", session="s", role="user", content="hi")
 
     assert name == "msg-1"
     assert csrf_route.call_count == 2
@@ -169,9 +165,7 @@ async def test_save_message_returns_none_on_http_error():
     respx.post(_MESSAGE_URL).mock(return_value=httpx.Response(500))
     client = FrappeHistoryClient(base_url="http://frappe:8000")
 
-    result = await client.save_message(
-        sid="abc", session="sess-1", role="user", content="hi"
-    )
+    result = await client.save_message(sid="abc", session="sess-1", role="user", content="hi")
     assert result is None
 
 
@@ -212,9 +206,7 @@ async def test_write_proceeds_without_token_when_csrf_fetch_fails():
     )
     client = FrappeHistoryClient(base_url="http://frappe:8000")
 
-    name = await client.save_message(
-        sid="abc", session="s", role="user", content="hi"
-    )
+    name = await client.save_message(sid="abc", session="s", role="user", content="hi")
 
     assert name == "msg-1"
     post = next(c.request for c in respx.calls if c.request.method == "POST")
@@ -235,9 +227,7 @@ async def test_write_proceeds_without_token_when_csrf_not_in_html():
     )
     client = FrappeHistoryClient(base_url="http://frappe:8000")
 
-    name = await client.save_message(
-        sid="abc", session="s", role="user", content="hi"
-    )
+    name = await client.save_message(sid="abc", session="s", role="user", content="hi")
 
     assert name == "msg-1"
     post = next(c.request for c in respx.calls if c.request.method == "POST")

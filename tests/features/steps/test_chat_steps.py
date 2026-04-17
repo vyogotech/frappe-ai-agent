@@ -73,8 +73,7 @@ def _happy(ctx: dict[str, Any]) -> None:
 
 
 @given(
-    "the stub chat service will yield a content event explaining access was denied "
-    "and then done"
+    "the stub chat service will yield a content event explaining access was denied and then done"
 )
 def _denied(ctx: dict[str, Any]) -> None:
     ctx["stub"].events = [
@@ -108,12 +107,8 @@ def _err(ctx: dict[str, Any]) -> None:
 # ---------- When ----------
 
 
-async def _do_post(
-    app: FastAPI, message: str, sid: str | None
-) -> tuple[int, Any, str]:
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+async def _do_post(app: FastAPI, message: str, sid: str | None) -> tuple[int, Any, str]:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         kwargs: dict[str, Any] = {
             "json": {"message": message},
             "headers": {"Accept": "text/event-stream"},

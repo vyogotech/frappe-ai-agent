@@ -99,9 +99,7 @@ class FrappeHistoryClient:
         """
         url = f"{self._base_url}{_CSRF_URL_PATH}"
         try:
-            async with httpx.AsyncClient(
-                timeout=self._timeout, follow_redirects=True
-            ) as client:
+            async with httpx.AsyncClient(timeout=self._timeout, follow_redirects=True) as client:
                 response = await client.get(
                     url,
                     headers={"Cookie": f"sid={sid}"},

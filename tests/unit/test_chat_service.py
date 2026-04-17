@@ -66,7 +66,9 @@ async def test_handle_message_builds_mcp_client_with_caller_sid():
     mock_graph.astream_events = _StreamFactory([])
 
     with (
-        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client) as mock_builder,  # noqa: E501
+        patch(
+            "ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client
+        ) as mock_builder,
         patch("ai_agent.services.chat.create_agent_graph", return_value=mock_graph),
     ):
         await _drain(
@@ -413,8 +415,7 @@ async def test_handle_message_uses_provided_session_id_without_creating():
     fake_history.create_session.assert_not_called()
     # User message attached to the existing session id
     user_calls = [
-        c for c in fake_history.save_message.call_args_list
-        if c.kwargs.get("role") == "user"
+        c for c in fake_history.save_message.call_args_list if c.kwargs.get("role") == "user"
     ]
     assert user_calls[0].kwargs["session"] == "existing-sess"
 

@@ -21,9 +21,7 @@ class PermissionDeniedError(Exception):
     def __init__(self, tool: str, doctype: str):
         self.tool = tool
         self.doctype = doctype
-        super().__init__(
-            f"Permission denied calling {tool} for doctype {doctype}"
-        )
+        super().__init__(f"Permission denied calling {tool} for doctype {doctype}")
 
 
 def is_permission_error(exc: Exception) -> bool:
@@ -63,10 +61,7 @@ def to_tool_result_message(exc: Exception) -> str:
     "too broad" at registration time. See `langgraph/prebuilt/tool_node.py`.
     """
     if isinstance(exc, PermissionDeniedError):
-        return (
-            f"Access denied: you do not have permission to read "
-            f"{exc.doctype} via {exc.tool}."
-        )
+        return f"Access denied: you do not have permission to read {exc.doctype} via {exc.tool}."
     if is_permission_error(exc):
         return f"Access denied: permission error — {exc}"
     return f"Tool call failed: {exc}"
