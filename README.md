@@ -1,161 +1,126 @@
-# Frappe Copilot Agent
+# Frappe AI Agent
 
-AI agent service for Frappe/ERPNext -- WebSocket streaming, tool-calling via MCP, and rich visual responses.
+AI agent service for Frappe/ERPNext — SSE streaming, tool-calling via MCP, and rich visual responses.
 
-![CI](https://github.com/frappe/copilot-agent/actions/workflows/ci.yml/badge.svg)
-![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
 ![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)
+![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
 
 ## Overview
 
-Frappe Copilot Agent is a standalone AI service that powers the Copilot sidebar in Frappe/ERPNext. Users ask questions in natural language and receive structured visual answers -- charts, tables, KPI cards, and status lists -- streamed in real time over WebSocket.
+Frappe AI Agent is a standalone service that powers the AI sidebar in Frappe/ERPNext. Users ask questions in natural language and receive structured visual answers — charts, tables, KPI cards, and status lists — streamed in real time over Server-Sent Events.
 
-The agent uses a LangGraph ReAct loop to reason about questions, call ERPNext tools via the Model Context Protocol (MCP), and compose rich content blocks from the results.
+The agent uses a LangGraph ReAct loop to reason about questions, call ERPNext tools via the Model Context Protocol (MCP), and compose rich content blocks from the results. Every request is authenticated using the caller's Frappe session cookie (`sid`), so Frappe's permission system is enforced end-to-end.
 
 ## Architecture
 
 ```
-Frappe App (Vue sidebar)
-    |
-    | WebSocket (JSON events)
-    v
-+--------------------------------------------------+
-|  Frappe Copilot Agent                            |
-|                                                  |
-|  Transport        FastAPI, WebSocket, REST       |
-|  Middleware        JWT auth, rate limiting        |
-|  Services          Chat, Session, Health         |
-|  Orchestration     LangGraph ReAct agent         |
-|  Integrations      LLM, MCP, PostgreSQL, Redis   |
-|  Observability     OTEL tracing, metrics, logs   |
-+--------------------------------------------------+
-    |                    |
-    | Streamable HTTP    | asyncpg / redis
-    v                    v
-MCP Server           PostgreSQL + Redis
-    |
-    | API calls
-    v
-ERPNext
+Browser (Vue sidebar)
+    │  POST /api/v1/chat  (SSE, Cookie: sid=...)
+    ▼
+frappe-ai-agent  (LangGraph ReAct loop)
+    │
+    ├──▶ Ollama / LLM           (reasoning + token stream)
+    │
+    ├──▶ frappe-mcp-server      (MCP tools, sid forwarded)
+    │       ▼
+    │    Frappe REST API         (runs as that user)
+    │
+    └──▶ Frappe DocType API     (save AI Chat Session/Message)
 ```
-
-## Features
-
-- **WebSocket streaming** -- real-time token-by-token and event-based delivery
-- **Tool-calling via MCP** -- LangGraph agent invokes ERPNext tools through Streamable HTTP
-- **Content blocks** -- Text, Chart (bar/line/pie/funnel/heatmap/calendar), Table, KPI, StatusList
-- **JWT authentication** -- token-based WebSocket auth with configurable expiry
-- **Rate limiting** -- Redis-backed per-user request throttling
-- **Redis sessions** -- persistent conversation sessions across reconnects
-- **PostgreSQL checkpoints** -- LangGraph state persistence via AsyncPostgresSaver
-- **Provider-agnostic LLM** -- supports OpenAI, Anthropic, Google via `init_chat_model`
-- **OpenTelemetry** -- distributed tracing, metrics, and structured JSON logging
-- **Docker-ready** -- multi-stage Dockerfile and docker-compose for dev/prod
 
 ## Quick Start
 
-```bash
-# 1. Clone
-git clone https://github.com/frappe/copilot-agent.git
-cd copilot-agent
+**Prerequisites:** Python 3.12+, [UV](https://docs.astral.sh/uv/), Ollama running locally, `frappe-mcp-server` running on port 8080.
 
-# 2. Install dependencies
-pip install uv
+```bash
+# 1. Install dependencies
 uv sync --all-extras
 
-# 3. Configure
+# 2. Configure
 cp .env.example .env
-# Edit .env: set AI_AGENT_JWT_SECRET to a random string
+# Edit .env if needed (defaults work with local Ollama + MCP on port 8080)
 
-# 4. Start infrastructure
-docker compose up -d postgres redis
-
-# 5. Run the server
+# 3. Start the agent
 make serve
 ```
 
-The agent is now running at `ws://localhost:8484/ws/chat`.
+The agent is now running at `http://localhost:8484`. The chat endpoint is `POST /api/v1/chat`.
 
 ## Configuration
 
-All settings are configured via environment variables with the `AI_AGENT_` prefix.
+All settings use the `AI_AGENT_` prefix. Configured via environment variables or `.env` file.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `AI_AGENT_HOST` | `str` | `0.0.0.0` | Server bind address |
 | `AI_AGENT_PORT` | `int` | `8484` | Server port |
 | `AI_AGENT_WORKERS` | `int` | `4` | Uvicorn worker count |
-| `AI_AGENT_CORS_ORIGINS` | `list[str]` | `["*"]` | Allowed CORS origins |
-| `AI_AGENT_JWT_SECRET` | `str` | *required* | Secret key for JWT signing |
-| `AI_AGENT_JWT_ALGORITHM` | `str` | `HS256` | JWT algorithm |
-| `AI_AGENT_JWT_EXPIRY_HOURS` | `int` | `24` | JWT token expiry in hours |
-| `AI_AGENT_LLM_PROVIDER` | `str` | `openai` | LLM provider (openai, anthropic, google) |
-| `AI_AGENT_LLM_BASE_URL` | `str` | `http://localhost:11434/v1` | LLM API base URL |
-| `AI_AGENT_LLM_API_KEY` | `str` | `""` | LLM API key |
-| `AI_AGENT_LLM_MODEL` | `str` | `llama3.2:3b` | Model name |
+| `AI_AGENT_CORS_ORIGINS` | `list[str]` | `["http://localhost:8000"]` | Allowed CORS origins (must be explicit, not `*`) |
+| `AI_AGENT_LLM_PROVIDER` | `str` | `ollama` | LLM provider (`ollama`, `openai`, `anthropic`, `google`) |
+| `AI_AGENT_LLM_BASE_URL` | `str` | `http://localhost:11434` | LLM API base URL |
+| `AI_AGENT_LLM_API_KEY` | `str` | `""` | LLM API key (not needed for Ollama) |
+| `AI_AGENT_LLM_MODEL` | `str` | `qwen3.5:9b` | Model name |
 | `AI_AGENT_LLM_TEMPERATURE` | `float` | `0.7` | Sampling temperature |
 | `AI_AGENT_LLM_MAX_TOKENS` | `int` | `4096` | Max output tokens |
-| `AI_AGENT_MCP_SERVER_URL` | `str` | `http://localhost:8080/mcp` | MCP server endpoint |
-| `AI_AGENT_DATABASE_URL` | `str` | `postgresql+asyncpg://copilot:copilot@localhost:5432/copilot` | PostgreSQL connection |
-| `AI_AGENT_REDIS_URL` | `str` | `redis://localhost:6379/0` | Redis connection |
-| `AI_AGENT_RATE_LIMIT_REQUESTS` | `int` | `60` | Max requests per window |
-| `AI_AGENT_RATE_LIMIT_WINDOW_SECONDS` | `int` | `60` | Rate limit window in seconds |
+| `AI_AGENT_MCP_SERVER_URL` | `str` | `http://localhost:8080/mcp` | MCP server Streamable HTTP endpoint |
+| `AI_AGENT_FRAPPE_URL` | `str` | `http://localhost:8000` | Frappe instance URL (for chat history persistence) |
 | `AI_AGENT_OTEL_ENDPOINT` | `str` | `""` | OTLP exporter endpoint (empty = disabled) |
-| `AI_AGENT_OTEL_SERVICE_NAME` | `str` | `copilot-agent` | OTEL service name |
-| `AI_AGENT_LOG_LEVEL` | `str` | `info` | Log level (debug, info, warning, error) |
-| `AI_AGENT_LOG_FORMAT` | `str` | `json` | Log format (json, console) |
+| `AI_AGENT_OTEL_SERVICE_NAME` | `str` | `frappe-ai-agent` | OTEL service name |
+| `AI_AGENT_LOG_LEVEL` | `str` | `info` | Log level (`debug`, `info`, `warning`, `error`) |
+| `AI_AGENT_LOG_FORMAT` | `str` | `json` | Log format (`json`, `console`) |
 
-## WebSocket Protocol
+## SSE Protocol
 
-Connect to `/ws/chat` with a JWT token as a query parameter: `ws://host:8484/ws/chat?token=<jwt>`.
+### Request
 
-### Client -> Server
+```
+POST /api/v1/chat
+Cookie: sid=<frappe-session-id>
+Content-Type: application/json
+Accept: text/event-stream
 
-```json
-{
-  "type": "chat",
-  "content": "Show me this month's sales",
-  "context": {"doctype": "Sales Invoice", "page": "list"},
-  "session_id": "ses_abc123",
-  "request_id": "req_001"
-}
+{"message": "Show me this month's sales", "session_id": "ses_abc123", "context": {"doctype": "Sales Invoice", "page": "list"}}
 ```
 
-### Server -> Client Events
+`session_id` is optional on the first message. The server assigns one and sends it back as the first event.
 
-**ack** -- message received, processing started:
-```json
-{"type": "ack", "request_id": "req_001", "session_id": "ses_abc123"}
+### Server Events
+
+Each event is a JSON object on a `data:` line, followed by two newlines.
+
+**session** — conversation ID (first event, always):
+```
+data: {"type":"session","id":"ses_abc123"}
 ```
 
-**tool_start** -- agent is calling a tool:
-```json
-{"type": "tool_start", "call_id": "call_1", "name": "list_documents", "arguments": {"doctype": "Sales Invoice"}}
+**status** — agent is working:
+```
+data: {"type":"status","message":"loading tools..."}
 ```
 
-**tool_end** -- tool call completed:
-```json
-{"type": "tool_end", "call_id": "call_1", "result": "Found 42 invoices", "success": true}
+**tool_call** — agent is calling an MCP tool:
+```
+data: {"type":"tool_call","name":"list_documents","arguments":{"doctype":"Sales Invoice"}}
 ```
 
-**content_block** -- structured visual content:
-```json
-{"type": "content_block", "block": {"type": "chart", "chart_type": "bar", "title": "Monthly Sales", "data": {"labels": ["Jan", "Feb", "Mar"], "datasets": [{"name": "Revenue", "values": [50000, 62000, 71000]}]}, "options": {"format": "currency", "currency": "USD"}}}
+**content** — plain text response (no structured blocks):
+```
+data: {"type":"content","text":"You have 42 pending invoices."}
 ```
 
-**token** -- streaming text token:
-```json
-{"type": "token", "content": "Here are"}
+**content_block** — structured visual content (chart, table, KPI, status_list):
+```
+data: {"type":"content_block","block":{"type":"chart","chart_type":"bar","title":"Monthly Sales","data":{"labels":["Jan","Feb","Mar"],"datasets":[{"name":"Revenue","values":[50000,62000,71000]}]}}}
 ```
 
-**error** -- something went wrong:
-```json
-{"type": "error", "code": "AGENT_ERROR", "message": "MCP server unreachable", "suggestion": "Check MCP server status", "request_id": "req_001"}
+**error** — something went wrong:
+```
+data: {"type":"error","message":"The AI service is currently unavailable."}
 ```
 
-**done** -- request complete:
-```json
-{"type": "done", "request_id": "req_001", "usage": {"input_tokens": 150, "output_tokens": 320}}
+**done** — request complete (last event, always):
+```
+data: {"type":"done","tools_called":["list_documents"],"data_quality":"high","timestamp":"2026-04-17T10:00:00Z"}
 ```
 
 ## Content Blocks
@@ -196,8 +161,8 @@ Colored badge items with optional document links.
 
 - Python 3.12+
 - [UV](https://docs.astral.sh/uv/) package manager
-- Docker and Docker Compose
-- PostgreSQL 16+ and Redis 7+ (or use docker-compose)
+- Ollama (or another LLM provider)
+- `frappe-mcp-server` running on port 8080
 
 ### Make Targets
 
@@ -205,7 +170,6 @@ Colored badge items with optional document links.
 |---------|-------------|
 | `make install` | Install all dependencies (including dev) |
 | `make test` | Run unit tests |
-| `make test-integration` | Run integration tests (requires Docker services) |
 | `make test-all` | Run all tests |
 | `make lint` | Check code with ruff |
 | `make format` | Auto-format code with ruff |
@@ -213,93 +177,58 @@ Colored badge items with optional document links.
 | `make serve` | Start dev server with hot reload on port 8484 |
 | `make clean` | Remove build artifacts and caches |
 
-### Testing
-
-```bash
-# Unit tests (no external services needed)
-uv run pytest tests/unit/ -v
-
-# With coverage
-uv run pytest tests/unit/ -v --cov=copilot_agent --cov-report=term-missing
-
-# Integration tests (requires PostgreSQL + Redis)
-docker compose up -d postgres redis
-uv run pytest tests/integration/ -v -m integration
-```
-
 ### Project Structure
 
 ```
-frappe-copilot-agent/
-├── src/copilot_agent/
+frappe-ai-agent/
+├── src/ai_agent/
 │   ├── app.py                  # FastAPI app factory with lifespan
 │   ├── config.py               # Pydantic settings (env vars)
 │   ├── agent/                  # LangGraph orchestration
-│   │   ├── graph.py            #   ReAct agent graph
-│   │   ├── state.py            #   Agent state schema
-│   │   ├── prompts.py          #   System prompt builder
-│   │   └── output.py           #   Output parser
+│   │   ├── graph.py            #   ReAct agent graph builder
+│   │   ├── prompts.py          #   System prompt template
+│   │   └── tool_errors.py      #   Tool error → LLM message translation
 │   ├── blocks/                 # Content block types
-│   │   ├── models.py           #   Pydantic models
-│   │   ├── parser.py           #   Block extraction from LLM output
-│   │   └── validators.py       #   Sanitize and truncate
+│   │   ├── models.py           #   Pydantic block models
+│   │   ├── parser.py           #   <ai-block> tag extraction
+│   │   └── validators.py       #   Truncation limits
 │   ├── integrations/           # External service clients
 │   │   ├── llm.py              #   Provider-agnostic LLM factory
-│   │   ├── mcp.py              #   MCP client adapter
-│   │   ├── postgres.py         #   AsyncPostgresSaver checkpointer
-│   │   └── redis.py            #   Redis client wrapper
+│   │   ├── mcp.py              #   Per-request MCP client builder
+│   │   └── frappe_history.py   #   Chat history persistence to Frappe
 │   ├── middleware/             # Request processing
-│   │   ├── auth.py             #   JWT authentication
-│   │   ├── rate_limit.py       #   Redis-backed rate limiter
+│   │   ├── sid.py              #   Frappe sid cookie extraction
 │   │   └── request_id.py       #   Request ID injection
 │   ├── observability/          # Monitoring
 │   │   ├── logging.py          #   structlog configuration
-│   │   ├── tracing.py          #   OpenTelemetry setup
-│   │   └── metrics.py          #   OTEL metrics
+│   │   └── tracing.py          #   OpenTelemetry setup
 │   ├── services/               # Business logic
-│   │   ├── chat.py             #   Chat orchestration
-│   │   ├── health.py           #   Health checks
-│   │   └── session.py          #   Session management
+│   │   ├── chat.py             #   Chat orchestration + event streaming
+│   │   └── health.py           #   Health checks
 │   └── transport/              # API layer
-│       ├── rest.py             #   REST endpoints
-│       ├── websocket.py        #   WebSocket handler
-│       └── schemas.py          #   Request/response models
-├── tests/
-│   ├── unit/                   # Unit tests (no external deps)
-│   ├── integration/            # Integration tests (requires services)
-│   └── features/               # BDD feature files
+│       ├── rest.py             #   REST endpoints (/health, /config)
+│       ├── sse.py              #   SSE chat endpoint (POST /api/v1/chat)
+│       └── sse_events.py       #   SSE wire-format serializer
+├── tests/unit/                 # Unit tests (no external deps)
 ├── Dockerfile                  # Multi-stage production build
-├── docker-compose.yml          # Dev environment (agent + PG + Redis)
+├── docker-compose.yml          # Dev environment
 ├── pyproject.toml              # UV project config, ruff, pytest
 ├── Makefile                    # Build/test/serve shortcuts
 └── .github/workflows/ci.yml   # CI pipeline
 ```
 
-## Deployment
-
-### Docker Build
+## Docker
 
 ```bash
-docker build -t frappe-copilot-agent .
-docker run -p 8484:8484 --env-file .env frappe-copilot-agent
+docker build -t frappe-ai-agent .
+docker run -p 8484:8484 --env-file .env frappe-ai-agent
 ```
 
-### Docker Compose (Full Stack)
+Or with docker-compose:
 
 ```bash
 docker compose up -d
 ```
-
-### Production Checklist
-
-- [ ] Set `AI_AGENT_JWT_SECRET` to a strong random value
-- [ ] Restrict `AI_AGENT_CORS_ORIGINS` to your Frappe domain
-- [ ] Use production PostgreSQL and Redis instances (not the bundled containers)
-- [ ] Set `AI_AGENT_OTEL_ENDPOINT` to your observability platform
-- [ ] Set `AI_AGENT_LOG_FORMAT=json` for structured log aggregation
-- [ ] Configure `AI_AGENT_LLM_API_KEY` for your chosen provider
-- [ ] Run behind a reverse proxy (nginx/caddy) with TLS termination
-- [ ] Set `AI_AGENT_RATE_LIMIT_REQUESTS` appropriate for your user base
 
 ## License
 
