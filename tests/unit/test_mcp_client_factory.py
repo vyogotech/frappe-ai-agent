@@ -12,7 +12,7 @@ def _make_settings(**overrides) -> Settings:
         mcp_server_url="http://mcp:8080/mcp",
     )
     base.update(overrides)
-    return Settings(**base)
+    return Settings(_env_file=None, **base)
 
 
 def test_client_is_built_with_sid_cookie_header():

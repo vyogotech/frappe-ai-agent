@@ -8,6 +8,7 @@ from ai_agent.integrations.llm import create_llm
 
 def test_create_llm_uses_explicit_ollama_branch_not_init_chat_model():
     settings = Settings(
+        _env_file=None,
         llm_provider="ollama",
         llm_model="qwen3.5:9b",
         llm_base_url="http://localhost:11434",
