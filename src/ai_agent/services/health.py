@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 import structlog
@@ -24,7 +25,11 @@ class HealthService:
         return results
 
     async def _check_mcp(self) -> dict[str, Any]:
-        url = self._settings.mcp_server_url.replace("/mcp", "/health")
+        # Parse the URL instead of str.replace — `mcp_server_url` like
+        # "http://mcp:8081/mcp" would otherwise have its *hostname* mangled
+        # ("//mcp" is the first match of "/mcp" in the string).
+        parsed = urlparse(self._settings.mcp_server_url)
+        url = urlunparse(parsed._replace(path="/health", query="", fragment=""))
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(url)

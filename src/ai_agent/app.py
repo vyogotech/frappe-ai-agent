@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from ai_agent.agent.graph import build_checkpointer
 from ai_agent.agent.prompts import build_system_prompt
@@ -71,6 +72,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 endpoint=settings.otel_endpoint,
                 service_name=settings.otel_service_name,
             )
+            FastAPIInstrumentor.instrument_app(app)
 
         logger.info("started")
         yield

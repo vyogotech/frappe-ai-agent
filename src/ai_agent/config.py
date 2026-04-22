@@ -2,11 +2,28 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Project root — the .env file sits next to pyproject.toml. Using an absolute
+# path keeps loading independent of the process CWD (tests, uvicorn in any
+# directory, Docker with bind-mounts, etc.). Missing .env is not an error;
+# pydantic-settings silently skips it and falls back to os.environ.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="AI_AGENT_")
+    # No extra="ignore": an orphan AI_AGENT_* key in .env (field removed from
+    # code but never cleaned out of the file) should crash startup, not be
+    # silently dropped onto the floor while the Python default takes over.
+    # (Note: pydantic-settings drops unknown prefixed vars from os.environ
+    # before validation, so this only catches drift in the .env file.)
+    model_config = SettingsConfigDict(
+        env_prefix="AI_AGENT_",
+        env_file=_PROJECT_ROOT / ".env",
+        env_file_encoding="utf-8",
+    )
 
     # Server
     host: str = "0.0.0.0"

@@ -11,7 +11,7 @@ from ai_agent.transport.rest import create_rest_router
 
 @pytest.fixture
 def settings():
-    return Settings()
+    return Settings(_env_file=None)
 
 
 @pytest.fixture
