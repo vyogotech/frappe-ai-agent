@@ -200,21 +200,28 @@ class ChatService:
 
         except Exception as exc:
             failed = True
-            # Client-facing message is intentionally generic — exceptions from
-            # langchain / langgraph / httpx / mcp routinely include file
-            # paths, internal URLs, or provider API details. The full traceback
-            # is in the structured log below, where operators can see it.
             logger.exception(
                 "chat_handle_message_failed",
                 session_id=session_id,
                 sid_present=bool(user_context.sid),
                 error_type=type(exc).__name__,
             )
-            yield {"type": "error", "message": "agent error — please retry"}
+            # Show the exception type plus the first line of its message,
+            # capped at 500 chars. Full tracebacks stay in the structured
+            # log, but this is an internally-authenticated agent — withholding
+            # the whole error breaks debugging for no real security gain.
+            first_line = str(exc).splitlines()[0] if str(exc) else ""
+            detail = first_line[:500]
+            error_message = (
+                f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+            )
+            yield {"type": "error", "message": error_message}
 
         # Persist the final assistant message (success or error). Best-effort:
         # if this fails it is logged inside the client and we still emit `done`.
-        assistant_content = "[error]" if failed else "".join(assistant_text_parts)
+        assistant_content = (
+            f"[error] {error_message}" if failed else "".join(assistant_text_parts)
+        )
         tool_args_json: str | None = None
         if tool_invocations:
             try:
