@@ -5,9 +5,21 @@ they did, the whole graph run would abort and the user would see an SSE error.
 Instead, we wrap each MCP tool so any exception becomes a string return value
 that flows back into the LLM as a normal tool observation. The LLM then writes
 a human-readable response explaining what failed.
+
+Two-step wiring (see `install_tool_error_handler`):
+
+1. Wrap the tool's coroutine so any non-`ToolException` is re-raised as a
+   `ToolException`. LangChain's `BaseTool.handle_tool_error` hook only fires
+   for `ToolException`; without this re-raise, raw `McpError` / `httpx` /
+   Frappe validation errors escape straight through the ToolNode and abort
+   the graph run.
+2. Set `handle_tool_error = to_tool_result_message` so LangChain folds the
+   now-`ToolException` into a string the LLM sees as the tool observation.
 """
 
 from __future__ import annotations
+
+from langchain_core.tools import BaseTool, ToolException
 
 
 class PermissionDeniedError(Exception):
@@ -65,3 +77,36 @@ def to_tool_result_message(exc: Exception) -> str:
     if is_permission_error(exc):
         return f"Access denied: permission error — {exc}"
     return f"Tool call failed: {exc}"
+
+
+def install_tool_error_handler(tool: BaseTool) -> None:
+    """Route any exception from `tool` through `to_tool_result_message`.
+
+    LangChain's built-in `handle_tool_error` path only covers `ToolException`,
+    so MCP / Frappe / httpx errors (which are not ToolException subclasses)
+    would escape the ToolNode and abort the graph. We wrap the tool's
+    async entry point so non-`ToolException` errors are re-raised as
+    `ToolException`, then let the built-in hook turn them into a string
+    observation the LLM can reason about.
+    """
+    # `coroutine` is declared on StructuredTool (what the MCP adapter uses)
+    # but not on BaseTool. Read via getattr for nullability; write via direct
+    # assignment (ignoring the BaseTool-scope type warning) because the
+    # runtime object is StructuredTool in every case we care about.
+    original = getattr(tool, "coroutine", None)
+    if original is None:
+        # MCP adapter always sets `coroutine`; defensive for other tool kinds.
+        return
+
+    async def _wrapped(*args, **kwargs):
+        try:
+            return await original(*args, **kwargs)
+        except ToolException:
+            raise
+        except Exception as exc:
+            # `from exc` preserves the original traceback in the log stream
+            # without putting it in the LLM-facing message.
+            raise ToolException(str(exc)) from exc
+
+    tool.coroutine = _wrapped  # type: ignore[attr-defined]
+    tool.handle_tool_error = to_tool_result_message
