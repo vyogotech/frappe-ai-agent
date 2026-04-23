@@ -57,3 +57,25 @@ async def test_sse_chat_route_with_sid_returns_event_stream():
     assert '"type":"content"' in body
     assert '"type":"done"' in body
     assert "data: " in body
+
+
+async def test_sse_chat_route_rejects_empty_message():
+    app = _build_app()
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        cookies={"sid": "valid-sid"},
+    ) as ac:
+        response = await ac.post("/api/v1/chat", json={"message": ""})
+    assert response.status_code == 422
+
+
+async def test_sse_chat_route_rejects_whitespace_only_message():
+    app = _build_app()
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        cookies={"sid": "valid-sid"},
+    ) as ac:
+        response = await ac.post("/api/v1/chat", json={"message": "   \n\t"})
+    assert response.status_code == 422

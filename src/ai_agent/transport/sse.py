@@ -6,16 +6,25 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ai_agent.middleware.sid import extract_user_context
 from ai_agent.transport.sse_events import serialize
 
 
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(min_length=1, max_length=32_000)
     session_id: str | None = None
     context: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("message")
+    @classmethod
+    def _reject_whitespace_only(cls, v: str) -> str:
+        # `min_length=1` alone accepts "   "; strip-check rejects it without
+        # mutating the value (so the LLM sees exactly what the user typed).
+        if not v.strip():
+            raise ValueError("message must not be whitespace-only")
+        return v
 
 
 def create_sse_router() -> APIRouter:

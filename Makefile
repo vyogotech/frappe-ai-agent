@@ -4,12 +4,6 @@ install:
 	uv sync --all-extras
 
 test:
-	uv run pytest tests/unit/ -v
-
-test-integration:
-	uv run pytest tests/integration/ -v -m integration
-
-test-all:
 	uv run pytest -v
 
 lint:
