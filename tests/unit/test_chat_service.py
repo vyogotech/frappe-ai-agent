@@ -272,16 +272,21 @@ async def test_handle_message_yields_error_on_exception_and_still_finishes_with_
 
 
 @pytest.mark.asyncio
-async def test_handle_message_sets_handle_tool_error_on_each_tool():
-    """Every tool returned from MCP must have handle_tool_error installed
-    before being handed to the graph factory."""
+async def test_handle_message_installs_error_handler_on_each_tool():
+    """Every tool returned from MCP must go through install_tool_error_handler,
+    which both wraps the coroutine and sets handle_tool_error. Checking the
+    handle_tool_error attribute alone is sufficient to confirm the call ran
+    (see test_tool_errors.py for the wrap behaviour itself)."""
+    from ai_agent.agent.tool_errors import to_tool_result_message
+
     service = _make_service()
     user_context = UserContext(sid="abc123")
 
-    # Build a couple of fake tools that have the handle_tool_error attribute
     tool_a = MagicMock()
+    tool_a.coroutine = AsyncMock(return_value="ok")
     tool_a.handle_tool_error = None
     tool_b = MagicMock()
+    tool_b.coroutine = AsyncMock(return_value="ok")
     tool_b.handle_tool_error = None
 
     mock_client = MagicMock()
@@ -302,9 +307,6 @@ async def test_handle_message_sets_handle_tool_error_on_each_tool():
                 user_context=user_context,
             )
         )
-
-    # Both tools must now have the error handler set
-    from ai_agent.agent.tool_errors import to_tool_result_message
 
     assert tool_a.handle_tool_error is to_tool_result_message
     assert tool_b.handle_tool_error is to_tool_result_message

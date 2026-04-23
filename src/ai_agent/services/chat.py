@@ -29,7 +29,7 @@ from langchain_core.runnables.schema import StreamEvent
 
 from ai_agent.agent.graph import create_agent_graph
 from ai_agent.agent.prompts import build_system_prompt
-from ai_agent.agent.tool_errors import to_tool_result_message
+from ai_agent.agent.tool_errors import install_tool_error_handler
 from ai_agent.blocks.parser import parse_blocks
 from ai_agent.config import Settings
 from ai_agent.integrations.frappe_history import FrappeHistoryClient
@@ -92,6 +92,7 @@ class ChatService:
         tool_invocations: list[dict[str, Any]] = []
         assistant_text_parts: list[str] = []
         failed = False
+        error_message = ""
 
         # Resolve / create the history session BEFORE the graph runs so the
         # user's message and the eventual assistant reply can both be stored.
@@ -135,11 +136,13 @@ class ChatService:
 
             # Install an error handler on every tool so exceptions raised by
             # individual tool calls become LLM-visible tool observations
-            # instead of aborting the whole graph run. The ToolNode in
-            # LangGraph catches the exception and returns the handler's
-            # string as the tool result; the LLM then responds gracefully.
+            # instead of aborting the whole graph run. `install_tool_error_handler`
+            # both wraps the coroutine (so non-ToolException errors are
+            # re-raised as ToolException) and sets `handle_tool_error` —
+            # both are needed because LangChain's built-in hook only catches
+            # ToolException, and MCP/Frappe errors don't subclass it.
             for tool in tools:
-                tool.handle_tool_error = to_tool_result_message
+                install_tool_error_handler(tool)
 
             logger.debug(
                 "chat_tools_loaded",
