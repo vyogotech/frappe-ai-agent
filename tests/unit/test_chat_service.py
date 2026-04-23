@@ -261,7 +261,10 @@ async def test_handle_message_yields_error_on_exception_and_still_finishes_with_
 
     error_events = [e for e in events if e["type"] == "error"]
     assert len(error_events) == 1
-    assert "mcp down" in error_events[0]["message"]
+    # Raw exception text ("mcp down") must NOT leak to the client — the
+    # message is a generic user-facing string. Detail lives in the log.
+    assert "mcp down" not in error_events[0]["message"]
+    assert "error" in error_events[0]["message"].lower()
     # Generator still emits a terminal `done` even on failure, with low quality.
     assert events[-1]["type"] == "done"
     assert events[-1]["data_quality"] == "low"
