@@ -108,14 +108,20 @@ def _err(ctx: dict[str, Any]) -> None:
 
 
 async def _do_post(app: FastAPI, message: str, sid: str | None) -> tuple[int, Any, str]:
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        kwargs: dict[str, Any] = {
-            "json": {"message": message},
-            "headers": {"Accept": "text/event-stream"},
-        }
-        if sid is not None:
-            kwargs["cookies"] = {"sid": sid}
-        resp = await client.post("/api/v1/chat", **kwargs)
+    # Set cookies on the client, not per-request — httpx deprecated the
+    # per-request form in recent versions.
+    client_kwargs: dict[str, Any] = {
+        "transport": ASGITransport(app=app),
+        "base_url": "http://test",
+    }
+    if sid is not None:
+        client_kwargs["cookies"] = {"sid": sid}
+    async with AsyncClient(**client_kwargs) as client:
+        resp = await client.post(
+            "/api/v1/chat",
+            json={"message": message},
+            headers={"Accept": "text/event-stream"},
+        )
     return resp.status_code, resp.headers, resp.text
 
 
