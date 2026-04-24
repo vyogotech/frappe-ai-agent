@@ -39,9 +39,7 @@ class TestHealthService:
     @pytest.mark.asyncio
     @respx.mock
     async def test_mcp_connect_error_swallowed_and_reported(self):
-        respx.get("http://mcp.test:8080/health").mock(
-            side_effect=httpx.ConnectError("mcp down")
-        )
+        respx.get("http://mcp.test:8080/health").mock(side_effect=httpx.ConnectError("mcp down"))
         respx.get("http://llm.test:11434/api/tags").respond(status_code=200)
 
         result = await HealthService(_settings()).check_all()
@@ -52,9 +50,7 @@ class TestHealthService:
     @respx.mock
     async def test_llm_timeout_swallowed_and_reported(self):
         respx.get("http://mcp.test:8080/health").respond(status_code=200)
-        respx.get("http://llm.test:11434/api/tags").mock(
-            side_effect=httpx.ReadTimeout("slow")
-        )
+        respx.get("http://llm.test:11434/api/tags").mock(side_effect=httpx.ReadTimeout("slow"))
 
         result = await HealthService(_settings()).check_all()
         assert result["llm"]["ok"] is False
