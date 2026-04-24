@@ -16,6 +16,7 @@ History write failures are logged but never abort the conversation.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
@@ -42,6 +43,12 @@ logger = structlog.get_logger(__name__)
 SystemPromptBuilder = Callable[[dict[str, Any]], str]
 
 _TITLE_MAX_LEN = 60
+
+# Upper bound for the MCP tools/list call. If the MCP server is unreachable or
+# hung, we must not wedge the SSE generator forever — 20 s is enough for a
+# cold-start listing over a slow link while being short enough that the user
+# gets a clear error rather than a dead stream.
+_MCP_TOOLS_LOAD_TIMEOUT_S = 20.0
 
 
 def _utcnow_rfc3339_z() -> str:
@@ -132,7 +139,15 @@ class ChatService:
 
             # Per-request MCP client carrying the caller's sid cookie.
             mcp_client = build_mcp_client_for_sid(self._settings, user_context.sid)
-            tools = await mcp_client.get_tools()
+            try:
+                tools = await asyncio.wait_for(
+                    mcp_client.get_tools(),
+                    timeout=_MCP_TOOLS_LOAD_TIMEOUT_S,
+                )
+            except TimeoutError as exc:
+                raise RuntimeError(
+                    f"MCP tools/list timed out after {_MCP_TOOLS_LOAD_TIMEOUT_S:.0f}s"
+                ) from exc
 
             # Install an error handler on every tool so exceptions raised by
             # individual tool calls become LLM-visible tool observations
