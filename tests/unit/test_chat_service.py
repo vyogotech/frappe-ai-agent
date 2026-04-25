@@ -10,7 +10,7 @@ from langchain_core.messages import AIMessageChunk
 
 from ai_agent.config import Settings
 from ai_agent.middleware.sid import UserContext
-from ai_agent.services.chat import ChatService
+from ai_agent.services.chat import ChatService, _BlockStreamSplitter
 
 
 def _make_settings() -> Settings:
@@ -521,14 +521,21 @@ async def test_content_with_ai_block_emits_content_block_events():
             )
         )
 
+    # With the BlockStreamSplitter, prose around the block streams as
+    # content events; only the structured `<ai-block>` becomes a
+    # content_block. The FE renders prose (via markdown) above the block.
+    content_events = [e for e in events if e["type"] == "content"]
     block_events = [e for e in events if e["type"] == "content_block"]
-    assert len(block_events) == 3, f"expected 3 blocks, got {block_events}"
-    assert block_events[0]["block"] == {"type": "text", "content": "Here are the users:"}
-    assert block_events[1]["block"]["type"] == "table"
-    assert block_events[1]["block"]["title"] == "Users"
-    assert block_events[2]["block"] == {"type": "text", "content": "That's 1 user."}
-    # No plain content event when blocks are present
-    assert [e for e in events if e["type"] == "content"] == []
+
+    assert len(block_events) == 1
+    assert block_events[0]["block"]["type"] == "table"
+    assert block_events[0]["block"]["title"] == "Users"
+
+    # Prose-before and prose-after the block both arrive as content.
+    streamed_text = "".join(e["text"] for e in content_events)
+    assert "Here are the users:" in streamed_text
+    assert "That's 1 user." in streamed_text
+
     # Stream still terminates with done
     assert events[-1]["type"] == "done"
 
@@ -647,3 +654,75 @@ async def test_content_without_blocks_keeps_single_content_event():
     assert len(content_events) == 1
     assert content_events[0]["text"] == "Hello! How can I help?"
     assert [e for e in events if e["type"] == "content_block"] == []
+
+
+# ─── _BlockStreamSplitter ─────────────────────────────────────────────────
+
+
+def _drain_splitter(splitter: _BlockStreamSplitter, chunks: list[str]):
+    out: list[tuple[str, str]] = []
+    for c in chunks:
+        for kind, payload in splitter.feed(c):
+            out.append((kind, payload))
+    for kind, payload in splitter.flush():
+        out.append((kind, payload))
+    return out
+
+
+def test_splitter_streams_pure_prose_unchanged():
+    out = _drain_splitter(
+        _BlockStreamSplitter(),
+        ["Hello, ", "world", "."],
+    )
+    assert out == [("content", "Hello, "), ("content", "world"), ("content", ".")]
+
+
+def test_splitter_holds_back_partial_open_tag_suffix():
+    """If a chunk ends with the start of `<ai-block`, the splitter must not
+    leak the suffix as content — it could complete in the next chunk."""
+    s = _BlockStreamSplitter()
+    out1 = list(s.feed("hello <ai-bl"))
+    assert out1 == [("content", "hello ")]
+    out2 = list(s.feed('ock type="kpi">{}</ai-block>'))
+    # full block markup arrived
+    block_events = [(k, p) for (k, p) in out2 if k == "block"]
+    assert len(block_events) == 1
+    assert block_events[0][1].startswith("<ai-block")
+    assert block_events[0][1].endswith("</ai-block>")
+
+
+def test_splitter_buffers_block_across_many_chunks():
+    chunks = [
+        "Prose before. ",
+        "<ai-block ",
+        'type="kpi">',
+        '{"metrics": [',
+        '{"label": "X", "value": 1, "format": "number"}]}',
+        "</ai-block>",
+        " Prose after.",
+    ]
+    out = _drain_splitter(_BlockStreamSplitter(), chunks)
+    # Prose before streams; block is one event; prose after streams.
+    assert ("content", "Prose before. ") in out
+    blocks = [p for (k, p) in out if k == "block"]
+    assert len(blocks) == 1
+    assert "<ai-block" in blocks[0] and "</ai-block>" in blocks[0]
+    assert ("content", " Prose after.") in out
+
+
+def test_splitter_does_not_leak_lt_that_isnt_an_ai_block():
+    """Chunks containing `<` that aren't `<ai-block` must stream through."""
+    out = _drain_splitter(_BlockStreamSplitter(), ["look at <p>this</p> tag"])
+    assert out == [("content", "look at <p>this</p> tag")]
+
+
+def test_splitter_flush_emits_residual_partial_block():
+    """If the LLM cuts off mid-tag, flush emits whatever was buffered as
+    content (better than silently dropping the trailing markup)."""
+    s = _BlockStreamSplitter()
+    out = list(s.feed('<ai-block type="kpi">{partial'))
+    assert out == []  # nothing emitted while inside an unclosed block
+    flushed = list(s.flush())
+    assert len(flushed) == 1
+    assert flushed[0][0] == "content"
+    assert flushed[0][1].startswith("<ai-block")

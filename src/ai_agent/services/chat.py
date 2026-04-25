@@ -51,6 +51,76 @@ _TITLE_MAX_LEN = 60
 _MCP_TOOLS_LOAD_TIMEOUT_S = 20.0
 
 
+_AI_BLOCK_OPEN = "<ai-block"
+_AI_BLOCK_CLOSE = "</ai-block>"
+
+
+class _BlockStreamSplitter:
+    """State machine that splits streamed LLM text into prose and block markup.
+
+    The LLM emits per-token chunks via `on_chat_model_stream`. Streaming each
+    chunk as a content event would leak partial `<ai-block ...>...</ai-block>`
+    markup into the FE bubble (the user sees raw HTML scrolling in until the
+    closing tag arrives). Instead, this splitter:
+
+    - Streams chunks of prose as soon as they're "safe" (not a partial open
+      tag), as ("content", text) events.
+    - Buffers chunks once an `<ai-block` is detected, until the matching
+      `</ai-block>` arrives, then emits the complete markup as a single
+      ("block", markup) event for parse_blocks() to handle.
+
+    Yields `(kind, payload)` tuples where `kind` is `"content"` or `"block"`.
+    """
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._in_block = False
+
+    def feed(self, chunk: str):
+        self._buf += chunk
+        while True:
+            if not self._in_block:
+                idx = self._buf.find(_AI_BLOCK_OPEN)
+                if idx >= 0:
+                    if idx > 0:
+                        yield ("content", self._buf[:idx])
+                    self._buf = self._buf[idx:]
+                    self._in_block = True
+                    continue
+                # No open tag yet. Hold back any suffix that matches a
+                # prefix of "<ai-block" so we don't leak a partial open
+                # tag into the FE bubble.
+                safe_end = len(self._buf)
+                for n in range(min(len(_AI_BLOCK_OPEN) - 1, len(self._buf)), 0, -1):
+                    if _AI_BLOCK_OPEN.startswith(self._buf[-n:]):
+                        safe_end = len(self._buf) - n
+                        break
+                if safe_end > 0:
+                    yield ("content", self._buf[:safe_end])
+                    self._buf = self._buf[safe_end:]
+                break
+            else:
+                end_idx = self._buf.find(_AI_BLOCK_CLOSE)
+                if end_idx < 0:
+                    break
+                end = end_idx + len(_AI_BLOCK_CLOSE)
+                yield ("block", self._buf[:end])
+                self._buf = self._buf[end:]
+                self._in_block = False
+
+    def flush(self):
+        """Emit any residual buffered text. Called once the LLM stream ends.
+
+        If we're stuck inside a block (LLM cut off mid-tag), the partial
+        markup is emitted as content so the user at least sees what
+        arrived, instead of silently losing it.
+        """
+        if self._buf:
+            yield ("content", self._buf)
+            self._buf = ""
+            self._in_block = False
+
+
 def _utcnow_rfc3339_z() -> str:
     """RFC3339 timestamp ending in `Z` (matches frappe-mcp-server format)."""
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -186,6 +256,27 @@ class ChatService:
                 "recursion_limit": 50,
             }
 
+            # Splitter buffers `<ai-block>...</ai-block>` markup across token
+            # chunks so the FE never sees partial HTML. Prose tokens stream
+            # through; complete block tags are parsed and emitted as
+            # content_block events that the FE renders via getBlockComponent.
+            splitter = _BlockStreamSplitter()
+
+            def _emit_split(kind: str, payload: str):
+                if kind == "content":
+                    return [{"type": "content", "text": payload}]
+                # Block markup. parse_blocks may return TextBlock segments
+                # if the LLM nested prose-like content inside the tag; emit
+                # those as plain content too so the FE markdown path
+                # picks them up.
+                events_out: list[dict[str, Any]] = []
+                for block in parse_blocks(payload):
+                    if block.type == "text":
+                        events_out.append({"type": "content", "text": block.content})
+                    else:
+                        events_out.append({"type": "content_block", "block": block.model_dump()})
+                return events_out
+
             async for event in graph.astream_events(
                 graph_input,
                 config=graph_config,
@@ -197,20 +288,16 @@ class ChatService:
                 if translated["type"] != "content":
                     yield translated
                     continue
-                # Content events may carry inlined <ai-block> tags.
-                # Parse into an ordered list of blocks. If the text has at
-                # least one real block, emit them as content_block events so
-                # the frontend can render each via its block component. Pure
-                # prose (no tags) is a single text block — fall back to a
-                # normal content event so simple answers keep the plain path.
                 assistant_text_parts.append(translated["text"])
-                parsed = parse_blocks(translated["text"])
-                has_real_blocks = any(b.type != "text" for b in parsed)
-                if not has_real_blocks:
-                    yield translated
-                    continue
-                for block in parsed:
-                    yield {"type": "content_block", "block": block.model_dump()}
+                for kind, payload in splitter.feed(translated["text"]):
+                    for ev in _emit_split(kind, payload):
+                        yield ev
+
+            # Stream ended. Flush any text the splitter is still holding
+            # (only happens if the LLM cut off mid-tag).
+            for kind, payload in splitter.flush():
+                for ev in _emit_split(kind, payload):
+                    yield ev
 
         except Exception as exc:
             failed = True
