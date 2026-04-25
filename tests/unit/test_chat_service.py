@@ -6,7 +6,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessageChunk
 
 from ai_agent.config import Settings
 from ai_agent.middleware.sid import UserContext
@@ -88,7 +88,7 @@ async def test_handle_message_builds_mcp_client_with_caller_sid():
 
 
 @pytest.mark.asyncio
-async def test_handle_message_yields_status_then_done_envelope():
+async def test_handle_message_yields_session_then_done_envelope():
     service = _make_service()
     user_context = UserContext(sid="abc123")
 
@@ -111,11 +111,11 @@ async def test_handle_message_yields_status_then_done_envelope():
             )
         )
 
+    # Minimum envelope: session announced first, done last. Generic
+    # "Loading tools" / "Thinking" status events were removed — the FE
+    # placeholder bubble is the loading indicator on its own.
     assert len(events) >= 2
-    # session is announced first so the frontend can remember the id
-    # before any chat activity starts.
     assert events[0]["type"] == "session"
-    assert events[1]["type"] == "status"
     assert events[-1]["type"] == "done"
     assert events[-1]["tools_called"] == []
     assert "timestamp" in events[-1]
@@ -178,14 +178,19 @@ async def test_handle_message_translates_final_llm_message_to_content_event():
     mock_client = MagicMock()
     mock_client.get_tools = AsyncMock(return_value=[])
 
-    final_msg = AIMessage(content="hello there")
+    # Token-by-token streaming via on_chat_model_stream — concatenated, the
+    # chunks form the final assistant message ("hello there").
     mock_graph = MagicMock()
     mock_graph.astream_events = _StreamFactory(
         [
             {
-                "event": "on_chat_model_end",
-                "data": {"output": final_msg},
-            }
+                "event": "on_chat_model_stream",
+                "data": {"chunk": AIMessageChunk(content="hello ")},
+            },
+            {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": AIMessageChunk(content="there")},
+            },
         ]
     )
 
@@ -203,8 +208,9 @@ async def test_handle_message_translates_final_llm_message_to_content_event():
         )
 
     content_events = [e for e in events if e["type"] == "content"]
-    assert len(content_events) == 1
-    assert content_events[0]["text"] == "hello there"
+    # One event per streamed chunk; concatenated they form the final reply.
+    assert len(content_events) == 2
+    assert "".join(e["text"] for e in content_events) == "hello there"
 
 
 @pytest.mark.asyncio
@@ -216,13 +222,16 @@ async def test_handle_message_ignores_ai_message_with_tool_calls():
     mock_client = MagicMock()
     mock_client.get_tools = AsyncMock(return_value=[])
 
-    intermediate = AIMessage(
+    # The streaming counterpart to AIMessage.tool_calls is
+    # AIMessageChunk.tool_call_chunks; chunks of a tool-calling step carry
+    # this and must not surface as user-visible content.
+    intermediate = AIMessageChunk(
         content="",
-        tool_calls=[{"id": "1", "name": "list_documents", "args": {}}],
+        tool_call_chunks=[{"id": "1", "name": "list_documents", "args": "{}", "index": 0}],
     )
     mock_graph = MagicMock()
     mock_graph.astream_events = _StreamFactory(
-        [{"event": "on_chat_model_end", "data": {"output": intermediate}}]
+        [{"event": "on_chat_model_stream", "data": {"chunk": intermediate}}]
     )
 
     with (
@@ -481,12 +490,15 @@ async def test_content_with_ai_block_emits_content_block_events():
 
     mock_client = MagicMock()
     mock_client.get_tools = AsyncMock(return_value=[])
+    # In real streaming the model emits many small chunks; for this test
+    # we deliver the entire <ai-block>-tagged response as one chunk so
+    # block parsing has the full text in a single content event.
     mock_graph = MagicMock()
     mock_graph.astream_events = _StreamFactory(
         [
             {
-                "event": "on_chat_model_end",
-                "data": {"output": AIMessage(content=final_text)},
+                "event": "on_chat_model_stream",
+                "data": {"chunk": AIMessageChunk(content=final_text)},
             }
         ]
     )
@@ -601,12 +613,14 @@ async def test_content_without_blocks_keeps_single_content_event():
 
     mock_client = MagicMock()
     mock_client.get_tools = AsyncMock(return_value=[])
+    # Single-chunk stream — the whole reply arrives in one chunk, so we
+    # get exactly one content event (matches the test's assertion below).
     mock_graph = MagicMock()
     mock_graph.astream_events = _StreamFactory(
         [
             {
-                "event": "on_chat_model_end",
-                "data": {"output": AIMessage(content="Hello! How can I help?")},
+                "event": "on_chat_model_stream",
+                "data": {"chunk": AIMessageChunk(content="Hello! How can I help?")},
             }
         ]
     )
