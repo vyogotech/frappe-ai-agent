@@ -24,7 +24,7 @@ from typing import Any
 from uuid import uuid4
 
 import structlog
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessageChunk, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.schema import StreamEvent
 
@@ -135,8 +135,6 @@ class ChatService:
         )
 
         try:
-            yield {"type": "status", "message": "loading tools..."}
-
             # Per-request MCP client carrying the caller's sid cookie.
             mcp_client = build_mcp_client_for_sid(self._settings, user_context.sid)
             try:
@@ -176,8 +174,6 @@ class ChatService:
                 system_prompt=system_prompt,
                 checkpointer=self._checkpointer,
             )
-
-            yield {"type": "status", "message": "thinking..."}
 
             graph_input = {"messages": [HumanMessage(content=message)]}
             graph_config: RunnableConfig = {
@@ -278,21 +274,24 @@ class ChatService:
             tool_invocations.append({"name": name, "args": args})
             return {"type": "tool_call", "name": name, "arguments": args}
 
-        if kind == "on_chat_model_end":
-            message = event.get("data", {}).get("output")
-            if not isinstance(message, AIMessage):
+        if kind == "on_chat_model_stream":
+            # Per-token streaming. Each event carries an AIMessageChunk;
+            # concatenated, the chunks form the final assistant message.
+            # We emit only chunks that have actual text and are NOT part of
+            # a tool-calling step. tool_call_chunks is the streaming
+            # counterpart to tool_calls — its presence means the model is
+            # currently emitting a tool invocation, not a user-visible reply.
+            chunk = event.get("data", {}).get("chunk")
+            if not isinstance(chunk, AIMessageChunk):
                 return None
-            # Skip intermediate AI messages that exist only to call tools —
-            # only the final natural-language answer should reach the user.
-            if getattr(message, "tool_calls", None):
+            if getattr(chunk, "tool_call_chunks", None):
                 return None
-            content = message.content
-            if not content:
-                return None
-            text = content if isinstance(content, str) else str(content)
-            if not text.strip():
+            content = chunk.content
+            text = content if isinstance(content, str) else ""
+            if not text:
                 return None
             return {"type": "content", "text": text}
 
-        # on_tool_end, on_chat_model_start, on_chain_*, etc. are swallowed.
+        # on_tool_end, on_chat_model_start, on_chat_model_end, on_chain_*,
+        # etc. are swallowed.
         return None
