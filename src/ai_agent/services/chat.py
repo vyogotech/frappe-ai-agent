@@ -277,27 +277,28 @@ class ChatService:
                         events_out.append({"type": "content_block", "block": block.model_dump()})
                 return events_out
 
-            async for event in graph.astream_events(
-                graph_input,
-                config=graph_config,
-                version="v2",
-            ):
-                translated = self._translate_event(event, tools_called, tool_invocations)
-                if translated is None:
-                    continue
-                if translated["type"] != "content":
-                    yield translated
-                    continue
-                assistant_text_parts.append(translated["text"])
-                for kind, payload in splitter.feed(translated["text"]):
+            try:
+                async for event in graph.astream_events(
+                    graph_input,
+                    config=graph_config,
+                    version="v2",
+                ):
+                    translated = self._translate_event(event, tools_called, tool_invocations)
+                    if translated is None:
+                        continue
+                    if translated["type"] != "content":
+                        yield translated
+                        continue
+                    assistant_text_parts.append(translated["text"])
+                    for kind, payload in splitter.feed(translated["text"]):
+                        for ev in _emit_split(kind, payload):
+                            yield ev
+            finally:
+                # Always flush so partial markup buffered in the splitter
+                # isn't silently dropped when the stream errors mid-token.
+                for kind, payload in splitter.flush():
                     for ev in _emit_split(kind, payload):
                         yield ev
-
-            # Stream ended. Flush any text the splitter is still holding
-            # (only happens if the LLM cut off mid-tag).
-            for kind, payload in splitter.flush():
-                for ev in _emit_split(kind, payload):
-                    yield ev
 
         except Exception as exc:
             failed = True
