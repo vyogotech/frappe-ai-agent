@@ -277,6 +277,13 @@ class ChatService:
                         events_out.append({"type": "content_block", "block": block.model_dump()})
                 return events_out
 
+            # We deliberately flush in the success path AND in an except
+            # clause that re-raises — NOT in a `finally`. Yielding from
+            # `finally` raises RuntimeError("async generator ignored
+            # GeneratorExit") when the consumer (Starlette) calls
+            # `aclose()` on client disconnect, which is common whenever
+            # the splitter has buffered content (partial open-tag suffix
+            # or in-block markup).
             try:
                 async for event in graph.astream_events(
                     graph_input,
@@ -293,12 +300,20 @@ class ChatService:
                     for kind, payload in splitter.feed(translated["text"]):
                         for ev in _emit_split(kind, payload):
                             yield ev
-            finally:
-                # Always flush so partial markup buffered in the splitter
-                # isn't silently dropped when the stream errors mid-token.
+            except Exception:
+                # `except Exception` does not catch GeneratorExit (which is
+                # BaseException), so client-disconnect cleanup propagates
+                # cleanly without entering this block.
                 for kind, payload in splitter.flush():
                     for ev in _emit_split(kind, payload):
                         yield ev
+                raise
+
+            # Stream ended normally — flush any text the splitter is still
+            # holding (only happens if the LLM cut off mid-tag).
+            for kind, payload in splitter.flush():
+                for ev in _emit_split(kind, payload):
+                    yield ev
 
         except Exception as exc:
             failed = True
