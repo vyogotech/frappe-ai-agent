@@ -149,6 +149,41 @@ class TestParseBlocks:
         assert blocks[0].type == "text"
         assert "Unknown block type" in blocks[0].content
 
+    def test_chart_alias_pie_renders_as_chart(self):
+        """Smaller models sometimes emit <ai-block type='pie'> instead of
+        type='chart' with chart_type='pie'. Treat these top-level chart
+        subtypes as aliases."""
+        text = (
+            '<ai-block type="pie">'
+            '{"title": "T", "data": {"labels": ["A","B"], "datasets": [{"name": "S", "values": [1,2]}]}}'
+            "</ai-block>"
+        )
+        blocks = parse_blocks(text)
+        assert len(blocks) == 1
+        assert blocks[0].type == "chart"
+        assert blocks[0].chart_type == "pie"
+
+    def test_chart_alias_bar_renders_as_chart(self):
+        text = (
+            '<ai-block type="bar">'
+            '{"title": "T", "data": {"labels": ["A"], "datasets": [{"name": "S", "values": [1]}]}}'
+            "</ai-block>"
+        )
+        blocks = parse_blocks(text)
+        assert len(blocks) == 1
+        assert blocks[0].type == "chart"
+        assert blocks[0].chart_type == "bar"
+
+    def test_chart_alias_respects_explicit_chart_type(self):
+        """If the inner JSON does specify chart_type, that wins over the alias."""
+        text = (
+            '<ai-block type="pie">'
+            '{"chart_type": "bar", "title": "T", "data": {"labels": ["A"], "datasets": [{"name": "S", "values": [1]}]}}'
+            "</ai-block>"
+        )
+        blocks = parse_blocks(text)
+        assert blocks[0].chart_type == "bar"
+
     def test_malformed_block_falls_back_to_raw_text(self):
         """Fix 2: malformed JSON should surface the raw content, not an opaque marker."""
         raw_payload = "{not valid json"
