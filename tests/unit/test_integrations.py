@@ -19,7 +19,7 @@ class TestCreateLLM:
             model_provider="openai",
             base_url="http://localhost:11434/v1",
             api_key=None,
-            temperature=0.7,
+            temperature=0.2,
             max_tokens=8192,
         )
 

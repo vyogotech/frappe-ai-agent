@@ -36,7 +36,11 @@ class Settings(BaseSettings):
     llm_base_url: str = "http://localhost:11434"
     llm_api_key: str = ""
     llm_model: str = "qwen3.5:9b"
-    llm_temperature: float = 0.7
+    # Lower temperature for more deterministic tool-call argument formatting.
+    # qwen3.5:9b at 0.7 occasionally emits malformed function-call XML
+    # (e.g. "<function> closed by </parameter>") after 8+ tool calls in a
+    # session. 0.2 keeps prose readable but tightens tool-arg syntax.
+    llm_temperature: float = 0.2
     llm_max_tokens: int = 8192
     # Ollama context window. Default is 2048 which is too small for our
     # system prompt + tool results + final answer with structured blocks —
