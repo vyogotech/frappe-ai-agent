@@ -63,8 +63,18 @@ def parse_blocks(text: str) -> list[ContentBlock]:
             block = model_cls.model_validate(data)
             blocks.append(validate_block(block))
         except (json.JSONDecodeError, ValidationError) as exc:
-            logger.warning("block_parse_error", block_type=block_type, error=str(exc))
-            blocks.append(TextBlock(content="[Could not render block]"))
+            logger.warning(
+                "block_parse_error",
+                block_type=block_type,
+                error=str(exc),
+                raw=json_str[:500] if json_str else None,
+            )
+            # Surface the raw content as plain text so the user sees what the
+            # agent tried to send. Truncate to keep the chat bubble readable.
+            fallback_content = json_str if json_str else "[block parse error]"
+            if len(fallback_content) > 1000:
+                fallback_content = fallback_content[:1000] + "\n…(truncated)"
+            blocks.append(TextBlock(content=fallback_content))
 
     # Capture trailing text
     trailing = text[last_end:].strip()
