@@ -20,7 +20,7 @@ class TestCreateLLM:
             base_url="http://localhost:11434/v1",
             api_key=None,
             temperature=0.7,
-            max_tokens=4096,
+            max_tokens=8192,
         )
 
     @patch("ai_agent.integrations.llm.init_chat_model")

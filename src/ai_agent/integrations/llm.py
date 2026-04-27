@@ -16,10 +16,17 @@ def create_llm(settings: Settings) -> BaseChatModel:
     if provider == "ollama":
         # Explicit branch for Ollama: avoids coupling to init_chat_model's
         # provider routing and keeps the dependency on langchain-ollama explicit.
+        # `num_predict` is Ollama's max-output-tokens knob; `num_ctx` is the
+        # context window. Without setting num_ctx, Ollama defaults to 2048
+        # which is too small for our system prompt + tool results + answer
+        # and causes the model to silently truncate earlier context, producing
+        # garbled mid-response output (e.g. "A$6,neakers" splice bug).
         return ChatOllama(
             model=settings.llm_model,
             base_url=settings.llm_base_url,
             temperature=settings.llm_temperature,
+            num_predict=settings.llm_max_tokens,
+            num_ctx=settings.llm_num_ctx,
         )
 
     return init_chat_model(
