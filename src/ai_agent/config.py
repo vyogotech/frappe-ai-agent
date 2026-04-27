@@ -37,7 +37,13 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = "qwen3.5:9b"
     llm_temperature: float = 0.7
-    llm_max_tokens: int = 4096
+    llm_max_tokens: int = 8192
+    # Ollama context window. Default is 2048 which is too small for our
+    # system prompt + tool results + final answer with structured blocks —
+    # the model silently truncates earlier context and produces garbled
+    # mid-response output. Bump to 16k for headroom on multi-tool queries.
+    # Ignored for non-Ollama providers.
+    llm_num_ctx: int = 16384
 
     # MCP: Streamable HTTP endpoint. frappe-mcp-server mounts /mcp on its
     # main HTTP port (default 8080), NOT the port+1 MCP-protocol-only server.
