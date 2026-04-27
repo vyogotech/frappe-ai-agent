@@ -184,6 +184,24 @@ class TestParseBlocks:
         blocks = parse_blocks(text)
         assert blocks[0].chart_type == "bar"
 
+    def test_chart_null_values_in_dataset_render_as_chart(self):
+        """LLMs use null in the values array for 'no data' points (e.g. an
+        item with no purchase record). Pydantic must accept this — the FE
+        echarts treats null as a gap. Without the fix the entire block
+        falls back to raw-text rendering and the chart never appears."""
+        text = (
+            '<ai-block type="chart">'
+            '{"chart_type": "bar", "title": "Profit", '
+            '"data": {"labels": ["A", "B", "C"], '
+            '"datasets": [{"name": "Profit", "values": [50000, null, -25000]}]}}'
+            "</ai-block>"
+        )
+        blocks = parse_blocks(text)
+        assert len(blocks) == 1
+        assert blocks[0].type == "chart"
+        # null preserved in the model so the FE can render a gap
+        assert blocks[0].data.datasets[0].values == [50000, None, -25000]
+
     def test_malformed_block_falls_back_to_raw_text(self):
         """Fix 2: malformed JSON should surface the raw content, not an opaque marker."""
         raw_payload = "{not valid json"

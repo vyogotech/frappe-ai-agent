@@ -15,10 +15,18 @@ class TextBlock(BaseModel):
 
 
 class Dataset(BaseModel):
-    """A named series of numeric values."""
+    """A named series of numeric values.
+
+    `None` is allowed as a "missing data" sentinel — echarts on the FE
+    renders a gap for null series points (correct semantics for
+    "no data" / "not applicable"). Without this, an LLM that emitted
+    null for a missing data point (e.g. profit when purchase cost is
+    unknown) would fail Pydantic validation and the whole chart block
+    would fall back to raw-text rendering.
+    """
 
     name: str
-    values: list[float | int] | list[list[float | int]]
+    values: list[float | int | None] | list[list[float | int | None]]
 
 
 class ChartData(BaseModel):
