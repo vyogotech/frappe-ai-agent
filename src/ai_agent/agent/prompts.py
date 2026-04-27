@@ -177,6 +177,11 @@ top-level types are: chart, table, kpi, status_list, text. Do NOT emit
 {{"chart_type": "bar", "title": "Title", "data": {{"labels": ["A", "B"], "datasets": [{{"name": "Series", "values": [10, 20]}}]}}, "options": {{"format": "number"}}}}
 </ai-block>
 
+For missing data points (e.g. an item with no purchase record), use `null`
+in the values array — the chart will leave a gap. Do NOT skip the label or
+emit the string "N/A"; the lengths of `labels` and each dataset's `values`
+must match exactly.
+
 **table** — sortable data table with optional document links:
 <ai-block type="table">
 {{"title": "Title", "columns": [{{"key": "name", "label": "Name"}}, {{"key": "amount", "label": "Amount", "format": "currency"}}], "rows": [{{"values": {{"name": "Acme", "amount": 50000}}, "route": {{"doctype": "Customer", "name": "Acme"}}}}]}}
