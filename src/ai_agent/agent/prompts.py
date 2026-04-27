@@ -7,6 +7,15 @@ SYSTEM_PROMPT = """\
 You are Frappe AI, an AI assistant embedded in ERPNext.
 
 Current page context: {page_context}
+Default currency: {currency} ({currency_symbol})
+
+Currency rules:
+- Use {currency_symbol} (not $, USD, or any other symbol) in prose, summaries,
+  and inline mentions of monetary values. Example: "{currency_symbol}87,000",
+  not "$87,000" or "Rs. 87,000".
+- Inside structured blocks (table/kpi cells with format=currency), emit raw
+  numeric values; the frontend formats them with the configured currency.
+- If the user explicitly asks for a different currency, use that one.
 
 You have access to MCP tools that let you interact with the Frappe/ERPNext backend:
 - list_documents: List records of a given DocType
@@ -71,9 +80,32 @@ Items 1-3 account for 66% of total revenue. Widget A leads with 300 units sold.\
 """
 
 
+_CURRENCY_SYMBOLS: dict[str, str] = {
+    "INR": "₹",
+    "USD": "$",
+    "EUR": "€",
+    "GBP": "£",
+    "JPY": "¥",
+    "AUD": "A$",
+    "CAD": "C$",
+    "CNY": "¥",
+    "AED": "AED ",
+    "SGD": "S$",
+}
+
+
 def build_system_prompt(context: dict) -> str:
-    """Build a system prompt with page context injected."""
+    """Build a system prompt with page context and currency injected.
+
+    Currency comes from `context["currency"]` (3-letter ISO code). Falls back
+    to INR — frontend's formatValue() also defaults to INR, so the bubble
+    text and the table-block cells stay consistent. To detect the user's
+    company currency at request time, the calling layer should populate
+    context["currency"] from frappe.db.get_default("currency") or the
+    Company.default_currency field.
+    """
     page_context = "ERPNext (no specific page)"
+    currency = "INR"
     if context:
         route = context.get("route", "")
         doctype = context.get("doctype")
@@ -82,4 +114,11 @@ def build_system_prompt(context: dict) -> str:
             page_context = f"{doctype}: {docname} (route: {route})"
         elif route:
             page_context = f"Route: {route}"
-    return SYSTEM_PROMPT.format(page_context=page_context)
+        if isinstance(context.get("currency"), str) and context["currency"]:
+            currency = context["currency"].upper()
+    currency_symbol = _CURRENCY_SYMBOLS.get(currency, currency + " ")
+    return SYSTEM_PROMPT.format(
+        page_context=page_context,
+        currency=currency,
+        currency_symbol=currency_symbol,
+    )
