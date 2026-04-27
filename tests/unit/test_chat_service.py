@@ -656,6 +656,86 @@ async def test_content_without_blocks_keeps_single_content_event():
     assert [e for e in events if e["type"] == "content_block"] == []
 
 
+@pytest.mark.asyncio
+async def test_handle_message_surfaces_mcp_tools_timeout_as_error_event():
+    """When MCP tools/list exceeds the bound, the user gets a clear error
+    event rather than a wedged stream. asyncio.wait_for re-raises
+    TimeoutError from the inner coroutine, which chat.py maps to a
+    RuntimeError carrying "timed out"."""
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(side_effect=TimeoutError)
+
+    with patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client):
+        events = await _drain(
+            service.handle_message(
+                message="hi",
+                session_id="s-timeout",
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    error_events = [e for e in events if e["type"] == "error"]
+    assert len(error_events) == 1
+    msg = error_events[0]["message"]
+    assert msg.startswith("RuntimeError")
+    assert "timed out" in msg.lower()
+    assert events[-1]["type"] == "done"
+    assert events[-1]["data_quality"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_handle_message_flushes_splitter_when_stream_raises_mid_block():
+    """If the graph stream raises while the splitter is buffering partial
+    block markup, the buffered text must still reach the FE (as content)
+    before the error event — flush is in a finally for this reason."""
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(return_value=[])
+
+    def _raising_stream(*_args, **_kwargs):
+        async def _gen():
+            # Drive the splitter into in_block state with a partial tag,
+            # then raise mid-stream.
+            yield {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": AIMessageChunk(content='<ai-block type="kpi">{partial')},
+            }
+            raise RuntimeError("stream blew up")
+
+        return _gen()
+
+    mock_graph = MagicMock()
+    mock_graph.astream_events = _raising_stream
+
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.create_agent_graph", return_value=mock_graph),
+    ):
+        events = await _drain(
+            service.handle_message(
+                message="hi",
+                session_id="s-flush",
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    content_texts = [e["text"] for e in events if e["type"] == "content"]
+    assert any("<ai-block" in t for t in content_texts), (
+        "splitter buffer was dropped on exception path"
+    )
+    error_events = [e for e in events if e["type"] == "error"]
+    assert len(error_events) == 1
+    assert "stream blew up" in error_events[0]["message"]
+    assert events[-1]["type"] == "done"
+
+
 # ─── _BlockStreamSplitter ─────────────────────────────────────────────────
 
 
