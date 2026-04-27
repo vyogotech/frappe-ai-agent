@@ -149,11 +149,35 @@ class TestParseBlocks:
         assert blocks[0].type == "text"
         assert "Unknown block type" in blocks[0].content
 
-    def test_malformed_json(self):
-        text = '<ai-block type="kpi">{bad json}</ai-block>'
+    def test_malformed_block_falls_back_to_raw_text(self):
+        """Fix 2: malformed JSON should surface the raw content, not an opaque marker."""
+        raw_payload = "{not valid json"
+        text = f'<ai-block type="kpi">{raw_payload}</ai-block>'
         blocks = parse_blocks(text)
         assert len(blocks) == 1
-        assert blocks[0].content == "[Could not render block]"
+        assert blocks[0].type == "text"
+        assert "Could not render block" not in blocks[0].content
+        assert raw_payload in blocks[0].content
+
+    def test_malformed_schema_falls_back_to_raw_text(self):
+        """A valid JSON payload that fails Pydantic validation also surfaces raw content."""
+        raw_payload = '{"not_a_real_field": true}'
+        text = f'<ai-block type="kpi">{raw_payload}</ai-block>'
+        blocks = parse_blocks(text)
+        assert len(blocks) == 1
+        assert blocks[0].type == "text"
+        assert "Could not render block" not in blocks[0].content
+        assert raw_payload in blocks[0].content
+
+    def test_malformed_block_long_content_is_truncated(self):
+        """Raw fallback content exceeding 1000 chars is truncated with a marker."""
+        raw_payload = "x" * 1200
+        text = f'<ai-block type="kpi">{raw_payload}</ai-block>'
+        blocks = parse_blocks(text)
+        assert len(blocks) == 1
+        assert blocks[0].type == "text"
+        assert len(blocks[0].content) < 1200
+        assert "truncated" in blocks[0].content
 
     def test_text_with_blocks(self):
         text = 'Before <ai-block type="text">{"content": "inside"}</ai-block> After'
