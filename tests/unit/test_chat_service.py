@@ -688,6 +688,63 @@ async def test_handle_message_surfaces_mcp_tools_timeout_as_error_event():
 
 
 @pytest.mark.asyncio
+async def test_handle_message_aclose_mid_stream_does_not_raise():
+    """Starlette calls aclose() on the SSE generator when the client
+    disconnects. If the generator is suspended at a yield while the
+    splitter buffer is non-empty (partial open-tag suffix held back, or
+    mid-block), aclose() must NOT raise. Yielding from a `finally` clause
+    during generator cleanup raises RuntimeError("async generator ignored
+    GeneratorExit") — the implementation must avoid that pattern."""
+    import asyncio as _asyncio
+
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    fake_history = MagicMock()
+    fake_history.create_session = AsyncMock(return_value="s-aclose")
+    fake_history.save_message = AsyncMock(return_value="m1")
+    service._history = fake_history
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(return_value=[])
+
+    async def _stream(*_a, **_k):
+        # "hello " is safe prose; "<ai-bl" is held back as a possible
+        # partial open tag. After this chunk the generator yields
+        # ("content", "hello ") and suspends at that yield with the
+        # splitter buffer holding "<ai-bl".
+        yield {
+            "event": "on_chat_model_stream",
+            "data": {"chunk": AIMessageChunk(content="hello <ai-bl")},
+        }
+        await _asyncio.sleep(60)  # never reached — consumer drops first
+
+    mock_graph = MagicMock()
+    mock_graph.astream_events = _stream
+
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.create_agent_graph", return_value=mock_graph),
+    ):
+        agen = service.handle_message(
+            message="hi",
+            session_id="s-aclose",
+            context={},
+            user_context=user_context,
+        )
+        # Drive past session and into the suspended-at-yield state.
+        ev1 = await agen.__anext__()
+        assert ev1["type"] == "session"
+        ev2 = await agen.__anext__()
+        assert ev2 == {"type": "content", "text": "hello "}
+        # Splitter buffer now holds "<ai-bl". Simulate client disconnect.
+        try:
+            await agen.aclose()
+        except RuntimeError as e:  # pragma: no cover — only fires on regression
+            pytest.fail(f"aclose raised RuntimeError: {e}")
+
+
+@pytest.mark.asyncio
 async def test_handle_message_flushes_splitter_when_stream_raises_mid_block():
     """If the graph stream raises while the splitter is buffering partial
     block markup, the buffered text must still reach the FE (as content)
