@@ -47,6 +47,14 @@ line-length = 100
 [tool.ruff.lint]
 select = ["F", "E", "W", "I", "UP", "B", "RUF"]
 
+[tool.pyright]
+# Match CI scope: CI runs `pyright src/` only. Tests intentionally exercise
+# patterns (private pydantic-settings kwargs, TypedDict variant access) that
+# pyright flags but are correct at runtime.
+pythonVersion = "3.12"
+include = ["src"]
+exclude = ["tests", "**/__pycache__", ".venv"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

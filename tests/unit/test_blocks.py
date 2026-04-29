@@ -155,7 +155,8 @@ class TestParseBlocks:
         subtypes as aliases."""
         text = (
             '<ai-block type="pie">'
-            '{"title": "T", "data": {"labels": ["A","B"], "datasets": [{"name": "S", "values": [1,2]}]}}'
+            '{"title": "T", "data": {"labels": ["A","B"],'
+            ' "datasets": [{"name": "S", "values": [1,2]}]}}'
             "</ai-block>"
         )
         blocks = parse_blocks(text)
@@ -178,7 +179,9 @@ class TestParseBlocks:
         """If the inner JSON does specify chart_type, that wins over the alias."""
         text = (
             '<ai-block type="pie">'
-            '{"chart_type": "bar", "title": "T", "data": {"labels": ["A"], "datasets": [{"name": "S", "values": [1]}]}}'
+            '{"chart_type": "bar", "title": "T",'
+            ' "data": {"labels": ["A"],'
+            ' "datasets": [{"name": "S", "values": [1]}]}}'
             "</ai-block>"
         )
         blocks = parse_blocks(text)

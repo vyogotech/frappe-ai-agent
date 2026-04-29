@@ -1,5 +1,4 @@
 """System prompt template and builder for the Frappe AI agent."""
-# ruff: noqa: E501 — prompt template contains long JSON example lines
 
 from __future__ import annotations
 
