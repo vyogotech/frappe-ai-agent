@@ -66,24 +66,25 @@ def parse_blocks(text: str) -> list[ContentBlock]:
         json_str = match.group(2)
         last_end = match.end()
 
-        model_cls = _BLOCK_TYPE_MAP.get(block_type)
         chart_alias = _CHART_ALIASES.get(block_type)
-        if not model_cls and not chart_alias:
+        if chart_alias is not None:
+            model_cls: type[ContentBlock] = ChartBlock
+        elif (mapped := _BLOCK_TYPE_MAP.get(block_type)) is not None:
+            model_cls = mapped
+        else:
             logger.warning("unknown_block_type", block_type=block_type)
             blocks.append(TextBlock(content=f"[Unknown block type: {block_type}]"))
             continue
 
         try:
             data = json.loads(json_str)
-            if chart_alias:
+            if chart_alias is not None:
                 # Alias path: the LLM used <ai-block type="pie"> instead of
                 # the canonical <ai-block type="chart"> with chart_type:"pie".
                 # Populate chart_type from the alias if the inner JSON omitted
                 # it; otherwise trust whatever the inner JSON says.
                 data.setdefault("chart_type", chart_alias)
-                block = ChartBlock.model_validate(data)
-            else:
-                block = model_cls.model_validate(data)
+            block = model_cls.model_validate(data)
             blocks.append(validate_block(block))
         except (json.JSONDecodeError, ValidationError) as exc:
             logger.warning(
