@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import TypeVar
-
 from ai_agent.blocks.models import (
     ChartBlock,
     ContentBlock,
@@ -17,13 +15,11 @@ MAX_CHART_DATAPOINTS = 500
 MAX_KPI_METRICS = 8
 MAX_STATUS_ITEMS = 50
 
+
 # Generic in the input type so callers that pass a TableBlock get a TableBlock
 # back (not the wider ContentBlock union). This lets pyright narrow attribute
 # access on the result without a redundant isinstance check.
-B = TypeVar("B", bound=ContentBlock)
-
-
-def validate_block(block: B) -> B:
+def validate_block[B: ContentBlock](block: B) -> B:
     """Apply truncation limits to a content block."""
     if isinstance(block, TableBlock) and len(block.rows) > MAX_TABLE_ROWS:
         return block.model_copy(update={"rows": block.rows[:MAX_TABLE_ROWS]})
