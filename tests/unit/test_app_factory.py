@@ -8,7 +8,7 @@ from ai_agent.config import Settings
 
 class TestCreateApp:
     def test_without_otel_endpoint_does_not_instrument(self):
-        settings = Settings(_env_file=None, otel_endpoint="")
+        settings = Settings(_env_file=None, otel_endpoint="")  # pyright: ignore[reportCallIssue]
         with patch("ai_agent.app.FastAPIInstrumentor") as mock_instrumentor:
             app = create_app(settings)
             with TestClient(app) as client:
@@ -18,7 +18,7 @@ class TestCreateApp:
         mock_instrumentor.instrument_app.assert_not_called()
 
     def test_with_otel_endpoint_calls_instrumentor(self):
-        settings = Settings(_env_file=None, otel_endpoint="http://localhost:4317")
+        settings = Settings(_env_file=None, otel_endpoint="http://localhost:4317")  # pyright: ignore[reportCallIssue]
         # Patch both the instrumentor and the tracer provider so we don't
         # spin up a real OTLP exporter during the test.
         with (
@@ -37,7 +37,7 @@ class TestCreateApp:
         mock_instrumentor.instrument_app.assert_called_once_with(app)
 
     def test_exposes_settings_and_chat_service_on_app_state(self):
-        settings = Settings(_env_file=None)
+        settings = Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
         app = create_app(settings)
         with TestClient(app):
             # state is populated during lifespan startup

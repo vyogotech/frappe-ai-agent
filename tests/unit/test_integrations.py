@@ -8,7 +8,7 @@ class TestCreateLLM:
     @patch("ai_agent.integrations.llm.init_chat_model")
     def test_creates_model_with_settings(self, mock_init):
         settings = Settings(
-            _env_file=None,
+            _env_file=None,  # pyright: ignore[reportCallIssue]
             llm_provider="openai",
             llm_base_url="http://localhost:11434/v1",
             llm_model="llama3.2:3b",
@@ -26,7 +26,7 @@ class TestCreateLLM:
     @patch("ai_agent.integrations.llm.init_chat_model")
     def test_passes_api_key_when_set(self, mock_init):
         settings = Settings(
-            _env_file=None,
+            _env_file=None,  # pyright: ignore[reportCallIssue]
             llm_provider="openai",
             llm_api_key="sk-123",
         )

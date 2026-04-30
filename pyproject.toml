@@ -48,12 +48,12 @@ line-length = 100
 select = ["F", "E", "W", "I", "UP", "B", "RUF"]
 
 [tool.pyright]
-# Match CI scope: CI runs `pyright src/` only. Tests intentionally exercise
-# patterns (private pydantic-settings kwargs, TypedDict variant access) that
-# pyright flags but are correct at runtime.
+# Type-check both src and tests. Test-only patterns that pyright legitimately
+# flags (private pydantic-settings kwargs, TypedDict variant access) are
+# narrowed via cast/isinstance asserts or per-line `# pyright: ignore`.
 pythonVersion = "3.12"
-include = ["src"]
-exclude = ["tests", "**/__pycache__", ".venv"]
+include = ["src", "tests"]
+exclude = ["**/__pycache__", ".venv"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

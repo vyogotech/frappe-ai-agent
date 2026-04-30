@@ -3,7 +3,7 @@ from ai_agent.config import Settings
 
 class TestSettings:
     def test_defaults(self):
-        settings = Settings(_env_file=None)
+        settings = Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
         assert settings.host == "0.0.0.0"
         assert settings.port == 8484
         assert settings.workers == 4
@@ -23,6 +23,6 @@ class TestSettings:
     def test_env_prefix(self, monkeypatch):
         monkeypatch.setenv("AI_AGENT_PORT", "9999")
         monkeypatch.setenv("AI_AGENT_LLM_MODEL", "mistral:7b")
-        settings = Settings(_env_file=None)
+        settings = Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
         assert settings.port == 9999
         assert settings.llm_model == "mistral:7b"
