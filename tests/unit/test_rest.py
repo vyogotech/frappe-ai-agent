@@ -11,7 +11,7 @@ from ai_agent.transport.rest import create_rest_router
 
 @pytest.fixture
 def settings():
-    return Settings(_env_file=None)
+    return Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
 
 
 @pytest.fixture

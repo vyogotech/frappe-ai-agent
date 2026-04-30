@@ -60,7 +60,9 @@ class TestTableBlock:
             ],
         )
         assert block.type == "table"
-        assert block.rows[0].route.doctype == "Customer"
+        route = block.rows[0].route
+        assert route is not None
+        assert route.doctype == "Customer"
 
 
 class TestKPIBlock:
@@ -185,6 +187,7 @@ class TestParseBlocks:
             "</ai-block>"
         )
         blocks = parse_blocks(text)
+        assert isinstance(blocks[0], ChartBlock)
         assert blocks[0].chart_type == "bar"
 
     def test_chart_null_values_in_dataset_render_as_chart(self):
@@ -239,9 +242,13 @@ class TestParseBlocks:
         text = 'Before <ai-block type="text">{"content": "inside"}</ai-block> After'
         blocks = parse_blocks(text)
         assert len(blocks) == 3
-        assert blocks[0].content == "Before"
-        assert blocks[1].content == "inside"
-        assert blocks[2].content == "After"
+        assert all(isinstance(b, TextBlock) for b in blocks)
+        # all() above narrows for runtime; pyright still sees the union, so
+        # bind through TextBlock(...).content via the model_validate-narrowed
+        # subclass instances directly:
+        assert isinstance(blocks[0], TextBlock) and blocks[0].content == "Before"
+        assert isinstance(blocks[1], TextBlock) and blocks[1].content == "inside"
+        assert isinstance(blocks[2], TextBlock) and blocks[2].content == "After"
 
     def test_chart_truncation_in_parser(self):
         import json

@@ -8,7 +8,7 @@ from ai_agent.services.health import HealthService
 
 def _settings() -> Settings:
     return Settings(
-        _env_file=None,
+        _env_file=None,  # pyright: ignore[reportCallIssue]
         mcp_server_url="http://mcp.test:8080/mcp",
         llm_base_url="http://llm.test:11434",
     )
@@ -63,7 +63,7 @@ class TestHealthService:
         """llm_base_url ending in /v1 (OpenAI-compatible) is converted to
         the Ollama /api/tags probe by stripping the suffix."""
         settings = Settings(
-            _env_file=None,
+            _env_file=None,  # pyright: ignore[reportCallIssue]
             mcp_server_url="http://mcp.test:8080/mcp",
             llm_base_url="http://llm.test:11434/v1",
         )

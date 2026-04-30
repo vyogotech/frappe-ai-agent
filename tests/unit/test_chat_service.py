@@ -15,7 +15,7 @@ from ai_agent.services.chat import ChatService, _BlockStreamSplitter
 
 def _make_settings() -> Settings:
     return Settings(
-        _env_file=None,
+        _env_file=None,  # pyright: ignore[reportCallIssue]
         llm_provider="ollama",
         llm_model="qwen3.5:9b",
         llm_base_url="http://localhost:11434",

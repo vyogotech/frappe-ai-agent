@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -163,8 +163,12 @@ class ChatService:
         session_id: str | None,
         context: dict[str, Any],
         user_context: UserContext,
-    ) -> AsyncIterator[dict[str, Any]]:
-        """Run the graph for one message, yielding SSE-schema events."""
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Run the graph for one message, yielding SSE-schema events.
+
+        Returns an AsyncGenerator (not AsyncIterator) so callers can call
+        aclose() to cancel the stream cleanly on client disconnect.
+        """
         tools_called: list[str] = []
         tool_invocations: list[dict[str, Any]] = []
         assistant_text_parts: list[str] = []
