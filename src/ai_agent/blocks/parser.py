@@ -31,16 +31,9 @@ _BLOCK_TYPE_MAP: dict[str, type[ContentBlock]] = {
 # Some smaller models (qwen3.5:9b, etc.) emit chart subtypes as the top-level
 # block type (e.g. <ai-block type="pie">) instead of <ai-block type="chart">
 # with chart_type:"pie" inside. Treat those as chart aliases — the inner JSON
-# is forwarded to ChartBlock with the alias filled in as chart_type when the
-# model omits it. Keep this list in sync with ChartBlock.chart_type Literal.
-_CHART_ALIASES: dict[str, str] = {
-    "bar": "bar",
-    "line": "line",
-    "pie": "pie",
-    "funnel": "funnel",
-    "heatmap": "heatmap",
-    "calendar": "calendar",
-}
+# is forwarded to ChartBlock with chart_type filled in from the tag when the
+# model omits it. Keep this set in sync with ChartBlock.chart_type Literal.
+_CHART_TYPES: frozenset[str] = frozenset({"bar", "line", "pie", "funnel", "heatmap", "calendar"})
 
 _BLOCK_PATTERN = re.compile(
     r"<ai-block\s+type=\"(\w+)\">\s*(.*?)\s*</ai-block>",
@@ -66,8 +59,8 @@ def parse_blocks(text: str) -> list[ContentBlock]:
         json_str = match.group(2)
         last_end = match.end()
 
-        chart_alias = _CHART_ALIASES.get(block_type)
-        if chart_alias is not None:
+        is_chart_alias = block_type in _CHART_TYPES
+        if is_chart_alias:
             model_cls: type[ContentBlock] = ChartBlock
         elif (mapped := _BLOCK_TYPE_MAP.get(block_type)) is not None:
             model_cls = mapped
@@ -78,12 +71,12 @@ def parse_blocks(text: str) -> list[ContentBlock]:
 
         try:
             data = json.loads(json_str)
-            if chart_alias is not None:
+            if is_chart_alias:
                 # Alias path: the LLM used <ai-block type="pie"> instead of
                 # the canonical <ai-block type="chart"> with chart_type:"pie".
-                # Populate chart_type from the alias if the inner JSON omitted
+                # Populate chart_type from the tag if the inner JSON omitted
                 # it; otherwise trust whatever the inner JSON says.
-                data.setdefault("chart_type", chart_alias)
+                data.setdefault("chart_type", block_type)
             block = model_cls.model_validate(data)
             blocks.append(validate_block(block))
         except (json.JSONDecodeError, ValidationError) as exc:
