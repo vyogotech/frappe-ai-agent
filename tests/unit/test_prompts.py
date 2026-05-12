@@ -55,12 +55,14 @@ class TestBuildSystemPrompt:
 
     def test_discovery_before_mutation_pattern_present(self):
         prompt = build_system_prompt({})
-        # The blueprint-first pattern must be in the prompt so the LLM
-        # doesn't invent fieldnames on create/update. After the trim the
-        # pattern is expressed as a rule rather than a labelled section.
-        assert "ff_get_doctype_blueprint" in prompt
+        # The discovery-before-mutation rule must be in the prompt so the LLM
+        # doesn't invent fieldnames on create/update. ff_get_doctype_blueprint
+        # was removed from the MCP catalog (May 2026); the rule now points the
+        # LLM at list_documents / get_document, which are in the current catalog.
+        assert "list_documents" in prompt
         assert "create_document" in prompt
         assert "update_document" in prompt
+        assert "ff_get_doctype_blueprint" not in prompt
 
     def test_advertises_aggregate_over_list_and_sum(self):
         # The trim kept this guidance because LLMs default to fetching lists
@@ -83,11 +85,22 @@ class TestBuildSystemPrompt:
                 f"call it and get 'tool not found'"
             )
 
-    def test_does_not_reference_legacy_get_doctype_meta(self):
-        # The previous prompt mentioned `get_doctype_meta` which is not in
-        # the current MCP server's tool catalog. Replaced with ff_get_doctype_*.
+    def test_does_not_reference_removed_tools(self):
+        # Tools removed from the MCP catalog must not be mentioned in the
+        # prompt — otherwise the LLM will try to call them and get
+        # "tool not found". `get_doctype_meta` was the original legacy name;
+        # the ff_* family (FrappeForge) was removed in May 2026.
         prompt = build_system_prompt({})
-        assert "get_doctype_meta" not in prompt
+        for removed in (
+            "get_doctype_meta",
+            "ff_get_doctype_blueprint",
+            "ff_get_doctype_detail",
+            "ff_search_doctype",
+            "ff_get_hooks",
+        ):
+            assert removed not in prompt, (
+                f"removed tool {removed!r} leaked into the prompt"
+            )
 
     def test_warns_against_pie_bar_top_level_block_types(self):
         # qwen3.5:9b regularly emitted <ai-block type="pie"> instead of
