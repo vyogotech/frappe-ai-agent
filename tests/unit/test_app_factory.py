@@ -39,7 +39,26 @@ class TestCreateApp:
     def test_exposes_settings_and_chat_service_on_app_state(self):
         settings = Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
         app = create_app(settings)
-        with TestClient(app):
-            # state is populated during lifespan startup
-            assert app.state.settings is settings
-            assert app.state.chat_service is not None
+        # State is populated at factory time, NOT lifespan — services are
+        # constructed in `create_app` so route introspection (tests, OpenAPI
+        # scrapers) sees them without needing to enter the TestClient context.
+        assert app.state.settings is settings
+        assert app.state.chat_service is not None
+
+    def test_routes_registered_before_lifespan_startup(self):
+        # Why: routers wired inside `lifespan` are invisible until first
+        # request — regression guard for that mistake.
+        settings = Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
+        app = create_app(settings)
+
+        chat_route = next(
+            (r for r in app.routes if getattr(r, "path", None) == "/api/v1/chat"),
+            None,
+        )
+        assert chat_route is not None, "POST /api/v1/chat not registered at factory time"
+        assert "POST" in getattr(chat_route, "methods", set())
+
+        # Sanity: REST routes too.
+        rest_paths = {getattr(r, "path", None) for r in app.routes}
+        assert "/health" in rest_paths
+        assert "/config" in rest_paths

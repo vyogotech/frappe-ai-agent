@@ -11,6 +11,10 @@
 services:
   mcp:
     image: frappe-mcp-server:local
+    # Port mapping is "<host>:<container>". 1808x are the host ports (mapped
+    # high so they don't collide with anything you already run on 808x);
+    # references to 8080/8081 in .env.example and the README are the
+    # container ports the mcp service binds internally.
     ports:
       - "18080:8080"   # legacy REST API
       - "18081:8081"   # MCP protocol endpoint (POST /mcp)
