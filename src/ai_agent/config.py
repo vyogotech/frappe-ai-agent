@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Project root — the .env file sits next to pyproject.toml. Using an absolute
@@ -31,6 +32,20 @@ class Settings(BaseSettings):
     workers: int = 4
     cors_origins: list[str] = ["http://localhost:8000"]
 
+    @field_validator("cors_origins")
+    @classmethod
+    def _reject_wildcard_origin(cls, v: list[str]) -> list[str]:
+        # Why: app.py sets allow_credentials=True. Starlette silently refuses
+        # to send credentialed responses when allow_origins contains "*", so
+        # a misconfigured deployment would 200 the request and *appear* fine
+        # while the browser drops the response. Fail at startup instead.
+        if "*" in v:
+            raise ValueError(
+                'cors_origins cannot contain "*" — credentialed CORS requires '
+                "an explicit origin list"
+            )
+        return v
+
     # LLM
     llm_provider: str = "ollama"
     llm_base_url: str = "http://localhost:11434"
@@ -48,6 +63,15 @@ class Settings(BaseSettings):
     # mid-response output. Bump to 16k for headroom on multi-tool queries.
     # Ignored for non-Ollama providers.
     llm_num_ctx: int = 16384
+
+    # Agent
+    # Why: small models loop while exploring schema and trip the LangGraph
+    # default of 25 before converging. 50 is enough headroom without letting
+    # a truly stuck agent run forever.
+    agent_recursion_limit: int = 50
+    # Why: per-sid rate limit on POST /api/v1/chat. slowapi syntax;
+    # "<count>/<period>" — minute / second / hour / day.
+    agent_rate_limit: str = "30/minute"
 
     # MCP: Streamable HTTP endpoint. frappe-mcp-server mounts /mcp on its
     # main HTTP port (default 8080), NOT the port+1 MCP-protocol-only server.

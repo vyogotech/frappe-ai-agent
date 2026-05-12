@@ -123,6 +123,66 @@ async def test_handle_message_yields_session_then_done_envelope():
     assert events[-1]["data_quality"] == "high"
 
 
+class _RecordingStreamFactory:
+    """Like _StreamFactory but records the kwargs of each astream_events call."""
+
+    def __init__(self, events: list[dict[str, Any]]) -> None:
+        self._events = events
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, *_args, **kwargs):
+        self.calls.append(kwargs)
+        events = self._events
+
+        async def _gen():
+            for ev in events:
+                yield ev
+
+        return _gen()
+
+
+@pytest.mark.asyncio
+async def test_handle_message_uses_recursion_limit_from_settings():
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        llm_provider="ollama",
+        llm_model="qwen3.5:9b",
+        llm_base_url="http://localhost:11434",
+        mcp_server_url="http://mcp:8080/mcp",
+        agent_recursion_limit=123,
+    )
+    service = ChatService(
+        settings=settings,
+        llm=MagicMock(),
+        checkpointer=MagicMock(),
+        system_prompt_builder=lambda _ctx: "you are helpful",
+    )
+    user_context = UserContext(sid="abc123")
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(return_value=[])
+
+    recording = _RecordingStreamFactory([])
+    mock_graph = MagicMock()
+    mock_graph.astream_events = recording
+
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.create_agent_graph", return_value=mock_graph),
+    ):
+        await _drain(
+            service.handle_message(
+                message="hi",
+                session_id="s1",
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    assert len(recording.calls) == 1
+    assert recording.calls[0]["config"]["recursion_limit"] == 123
+
+
 @pytest.mark.asyncio
 async def test_handle_message_translates_tool_start_to_tool_call_event():
     service = _make_service()

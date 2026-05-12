@@ -5,9 +5,12 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from ai_agent.agent.graph import build_checkpointer
 from ai_agent.agent.prompts import build_system_prompt
@@ -24,6 +27,18 @@ from ai_agent.transport.sse import create_sse_router
 logger = structlog.get_logger()
 
 
+def _sid_or_ip_key(request: Request) -> str:
+    """Key function for slowapi — prefer caller's sid, fall back to IP.
+
+    Why: the chat route 401s without a sid, so sid will normally be present.
+    The IP fallback covers any future endpoints we decorate.
+    """
+    sid = request.cookies.get("sid")
+    if sid and sid.strip():
+        return f"sid:{sid}"
+    return f"ip:{get_remote_address(request)}"
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Create the FastAPI application."""
     if settings is None:
@@ -31,37 +46,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     setup_logging(level=settings.log_level, log_format=settings.log_format)
 
+    # Services + routers are bound at factory time, not during startup.
+    # Why: routers wired inside `lifespan` are invisible to anything that
+    # inspects `app.routes` before the first request (tests, OpenAPI
+    # scrapers). All construction here is in-process and synchronous
+    # (no network I/O — ChatService builds its MCP client per request).
+    checkpointer = build_checkpointer()
+    llm = create_llm(settings)
+    chat_service = ChatService(
+        settings=settings,
+        llm=llm,
+        checkpointer=checkpointer,
+        system_prompt_builder=build_system_prompt,
+    )
+    health_service = HealthService(settings=settings)
+    limiter = Limiter(key_func=_sid_or_ip_key)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         logger.info("starting", port=settings.port, model=settings.llm_model)
 
-        checkpointer = build_checkpointer()
-        llm = create_llm(settings)
-
-        # Services. ChatService builds its MCP client + agent graph per
-        # request using the caller's sid, so nothing tool-related happens at
-        # startup.
-        chat_service = ChatService(
-            settings=settings,
-            llm=llm,
-            checkpointer=checkpointer,
-            system_prompt_builder=build_system_prompt,
-        )
-        health_service = HealthService(settings=settings)
-
-        app.include_router(
-            create_rest_router(
-                settings=settings,
-                health_service=health_service,
-            )
-        )
-        app.include_router(create_sse_router())
-
-        # Store for access in tests/extensions
-        app.state.settings = settings
-        app.state.chat_service = chat_service
-
-        # OTEL
+        # OTEL is the one piece that legitimately needs startup timing —
+        # the exporter background thread is what we don't want spinning up
+        # in tests that construct the app for introspection only.
         if settings.otel_endpoint:
             create_tracer_provider(
                 endpoint=settings.otel_endpoint,
@@ -80,10 +87,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
+    # slowapi: register the 429 handler. Why no SlowAPIMiddleware: the
+    # middleware runs the limit check before FastAPI dependency resolution,
+    # so unauthenticated requests would burn a token before the sid-check
+    # 401s. Without the middleware, the @limiter.limit decorator performs
+    # the check inside the wrapped function — i.e. after Depends() runs.
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
+
     # Middleware
     # Credentialed CORS: the Frappe frontend forwards the `sid` cookie so the
     # agent can authenticate the caller against Frappe. That requires an
-    # explicit origin list (no "*") and allow_credentials=True.
+    # explicit origin list (no "*", enforced by config.py) and
+    # allow_credentials=True.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
@@ -92,5 +108,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
     app.add_middleware(RequestIDMiddleware)
+
+    # Routers
+    app.include_router(
+        create_rest_router(
+            settings=settings,
+            health_service=health_service,
+        )
+    )
+    app.include_router(
+        create_sse_router(limiter=limiter, rate_limit=settings.agent_rate_limit),
+    )
+
+    # Stored for access in tests/extensions
+    app.state.settings = settings
+    app.state.chat_service = chat_service
 
     return app

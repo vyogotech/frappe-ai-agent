@@ -6,7 +6,9 @@ to `handle_message`. Every request uses the caller's sid to authenticate with
 the MCP server so tool calls run under that Frappe user's permissions.
 
 Events yielded here must match the SSE schema in `transport.sse_events`:
-`status`, `tool_call`, `content`, `done`, `error`.
+`session` (announced first, carrying the resolved history id), `status`,
+`tool_call`, `content`, `content_block` (parsed `<ai-block>` markup),
+`error`, and `done`.
 
 Chat history is persisted best-effort to Frappe via `FrappeHistoryClient`:
 we create a session if none is supplied, record the user's message before
@@ -252,12 +254,10 @@ class ChatService:
             graph_input = {"messages": [HumanMessage(content=message)]}
             graph_config: RunnableConfig = {
                 "configurable": {"thread_id": session_id or "default"},
-                # Smaller local models (qwen3.5:9b, llama3.1:8b, ...) are
-                # prone to tool-call loops — they'll list the same doctype
-                # over and over exploring the schema. The LangGraph default
-                # of 25 trips before they converge. 50 is enough headroom
-                # without letting a truly-stuck agent run forever.
-                "recursion_limit": 50,
+                # Why (default 50): smaller local models loop while exploring
+                # doctype schemas and trip the LangGraph default of 25 before
+                # converging. Configurable via AI_AGENT_AGENT_RECURSION_LIMIT.
+                "recursion_limit": self._settings.agent_recursion_limit,
             }
 
             # Splitter buffers `<ai-block>...</ai-block>` markup across token
