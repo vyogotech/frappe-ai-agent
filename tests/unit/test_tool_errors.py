@@ -4,29 +4,21 @@ from langchain_core.tools import StructuredTool, ToolException
 from pydantic import BaseModel
 
 from ai_agent.agent.tool_errors import (
-    PermissionDeniedError,
     install_tool_error_handler,
     is_permission_error,
     to_tool_result_message,
 )
 
 
-def test_permission_denied_error_carries_tool_and_doctype():
-    err = PermissionDeniedError(tool="list_invoices", doctype="Sales Invoice")
-    assert err.tool == "list_invoices"
-    assert err.doctype == "Sales Invoice"
-    assert "Sales Invoice" in str(err)
-    assert "list_invoices" in str(err)
+def test_to_tool_result_message_handles_permission_error_text():
+    """Permission errors detected via text content get the 'Access denied' prefix."""
 
+    class _FakeErr(Exception):
+        pass
 
-def test_to_tool_result_message_handles_permission_denied():
-    err = PermissionDeniedError(tool="list_invoices", doctype="Sales Invoice")
-    msg = to_tool_result_message(err)
-    assert "Access denied" in msg
+    msg = to_tool_result_message(_FakeErr("User does not have permission to read Sales Invoice"))
+    assert msg.startswith("Access denied")
     assert "Sales Invoice" in msg
-    # The message must be actionable for the LLM — it should hint that the
-    # user lacks permission, not expose a stack trace.
-    assert "permission" in msg.lower()
 
 
 def test_to_tool_result_message_handles_generic_exception():
@@ -118,11 +110,12 @@ async def test_install_tool_error_handler_preserves_existing_tool_exception():
 
 
 async def test_install_tool_error_handler_routes_permission_errors():
-    """PermissionDeniedError → dedicated 'Access denied' wording, not the
-    generic 'Tool call failed' prefix."""
+    """Frappe-style permission errors → 'Access denied' wording via the
+    is_permission_error text-content check, not the generic 'Tool call failed'
+    prefix. The wrapper preserves str(exc) so the text-match path fires."""
 
     async def _forbidden(**_):
-        raise PermissionDeniedError(tool="list_invoices", doctype="Sales Invoice")
+        raise RuntimeError("User does not have permission to read Sales Invoice")
 
     tool = _build_mcp_like_tool(_forbidden)
     install_tool_error_handler(tool)
