@@ -427,6 +427,7 @@ async def test_handle_message_creates_session_when_session_id_is_none():
     fake_history = MagicMock()
     fake_history.create_session = AsyncMock(return_value="sess-42")
     fake_history.save_message = AsyncMock(return_value="msg-1")
+    fake_history.ensure_session = AsyncMock(side_effect=lambda *, name, **_: name)
     service._history = fake_history  # inject directly
 
     mock_client = MagicMock()
@@ -468,6 +469,7 @@ async def test_handle_message_uses_provided_session_id_without_creating():
     fake_history = MagicMock()
     fake_history.create_session = AsyncMock(return_value="should-not-use")
     fake_history.save_message = AsyncMock(return_value="msg-1")
+    fake_history.ensure_session = AsyncMock(side_effect=lambda *, name, **_: name)
     service._history = fake_history
 
     mock_client = MagicMock()
@@ -504,6 +506,7 @@ async def test_handle_message_continues_when_history_writes_fail():
     fake_history = MagicMock()
     fake_history.create_session = AsyncMock(return_value=None)  # Frappe down
     fake_history.save_message = AsyncMock(return_value=None)
+    fake_history.ensure_session = AsyncMock(side_effect=lambda *, name, **_: name)
     service._history = fake_history
 
     mock_client = MagicMock()
@@ -566,6 +569,7 @@ async def test_content_with_ai_block_emits_content_block_events():
     fake_history = MagicMock()
     fake_history.create_session = AsyncMock(return_value="sess-1")
     fake_history.save_message = AsyncMock(return_value="msg-1")
+    fake_history.ensure_session = AsyncMock(side_effect=lambda *, name, **_: name)
     service._history = fake_history
 
     with (
@@ -610,6 +614,7 @@ async def test_session_event_announces_created_session_id():
     fake_history = MagicMock()
     fake_history.create_session = AsyncMock(return_value="sess-created")
     fake_history.save_message = AsyncMock(return_value="msg-1")
+    fake_history.ensure_session = AsyncMock(side_effect=lambda *, name, **_: name)
     service._history = fake_history
 
     mock_client = MagicMock()
@@ -645,6 +650,7 @@ async def test_session_event_echoes_existing_session_id():
     fake_history = MagicMock()
     fake_history.create_session = AsyncMock(return_value="should-not-use")
     fake_history.save_message = AsyncMock(return_value="msg-1")
+    fake_history.ensure_session = AsyncMock(side_effect=lambda *, name, **_: name)
     service._history = fake_history
 
     mock_client = MagicMock()
@@ -695,6 +701,7 @@ async def test_content_without_blocks_keeps_single_content_event():
     fake_history = MagicMock()
     fake_history.create_session = AsyncMock(return_value="sess-1")
     fake_history.save_message = AsyncMock(return_value="msg-1")
+    fake_history.ensure_session = AsyncMock(side_effect=lambda *, name, **_: name)
     service._history = fake_history
 
     with (
@@ -763,6 +770,7 @@ async def test_handle_message_aclose_mid_stream_does_not_raise():
     fake_history = MagicMock()
     fake_history.create_session = AsyncMock(return_value="s-aclose")
     fake_history.save_message = AsyncMock(return_value="m1")
+    fake_history.ensure_session = AsyncMock(side_effect=lambda *, name, **_: name)
     service._history = fake_history
 
     mock_client = MagicMock()
