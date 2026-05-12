@@ -22,30 +22,13 @@ from __future__ import annotations
 from langchain_core.tools import BaseTool, ToolException
 
 
-class PermissionDeniedError(Exception):
-    """Raised when a Frappe tool call is refused because the user lacks permission.
-
-    Carries both the tool that was invoked and the underlying doctype so the
-    LLM's response can be specific ("cannot read Sales Invoice") rather than
-    a generic auth failure.
-    """
-
-    def __init__(self, tool: str, doctype: str):
-        self.tool = tool
-        self.doctype = doctype
-        super().__init__(f"Permission denied calling {tool} for doctype {doctype}")
-
-
 def is_permission_error(exc: Exception) -> bool:
     """Heuristic: does this exception look like a Frappe permission denial?
 
     Checks (in order):
-      1. The exception is a PermissionDeniedError
-      2. It has a status_code attribute equal to 401 or 403
-      3. Its string representation contains common permission wording
+      1. It has a status_code attribute equal to 401 or 403
+      2. Its string representation contains common permission wording
     """
-    if isinstance(exc, PermissionDeniedError):
-        return True
     status_code = getattr(exc, "status_code", None)
     if status_code in (401, 403):
         return True
@@ -72,8 +55,6 @@ def to_tool_result_message(exc: Exception) -> str:
     to decide which exception classes to catch. BaseException is rejected as
     "too broad" at registration time. See `langgraph/prebuilt/tool_node.py`.
     """
-    if isinstance(exc, PermissionDeniedError):
-        return f"Access denied: you do not have permission to read {exc.doctype} via {exc.tool}."
     if is_permission_error(exc):
         return f"Access denied: permission error — {exc}"
     return f"Tool call failed: {exc}"
