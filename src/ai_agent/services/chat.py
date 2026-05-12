@@ -195,6 +195,17 @@ class ChatService:
                 )
             else:
                 session_id = created
+        else:
+            # Caller supplied an id (e.g. Frappe forwarded the browser's
+            # conversation id). Ensure a matching AI Chat Session row exists
+            # so the upcoming save_message calls' Link validation doesn't
+            # 417. Idempotent: a duplicate-name create is treated as success.
+            await self._history.ensure_session(
+                sid=user_context.sid,
+                name=session_id,
+                title=_derive_title(message),
+                context_json=json.dumps(context or {}),
+            )
 
         # Announce the session id so the frontend can remember it and
         # pass it back on subsequent messages in the same conversation.

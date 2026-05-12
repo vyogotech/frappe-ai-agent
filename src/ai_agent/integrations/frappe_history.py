@@ -54,6 +54,30 @@ class FrappeHistoryClient:
         payload = {"title": title, "context_json": context_json}
         return await self._post_and_extract_name(url, payload, sid, "session")
 
+    async def ensure_session(
+        self,
+        *,
+        sid: str,
+        name: str,
+        title: str,
+        context_json: str,
+    ) -> str | None:
+        """Ensure an AI Chat Session with this exact ``name`` exists.
+
+        Used when the caller supplies a conversation id (e.g. forwarded by
+        Frappe from the browser) — subsequent message writes' Link validation
+        would 417 against a missing parent row. We attempt to create with the
+        explicit ``name`` field; a duplicate-name conflict means the session
+        is already there from an earlier turn, which is success.
+        """
+        url = f"{self._base_url}{_SESSION_URL_PATH}"
+        payload = {"name": name, "title": title, "context_json": context_json}
+        result = await self._post_and_extract_name(url, payload, sid, "session")
+        # If creation returned the name, great. Otherwise assume it failed
+        # because the row already exists (idempotent) — return the supplied
+        # name so the caller can keep using it.
+        return result or name
+
     async def save_message(
         self,
         *,
