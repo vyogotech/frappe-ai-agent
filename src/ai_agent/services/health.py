@@ -39,6 +39,13 @@ class HealthService:
             return {"ok": False, "error": str(e)}
 
     async def _check_llm(self) -> dict[str, Any]:
+        # Only Ollama exposes `/api/tags`. Hosted providers (OpenAI, Anthropic,
+        # Google) use auth-gated `/v1/models` endpoints we don't want to call
+        # from a public health route, so we skip the probe and let `healthy`
+        # remain a function of the MCP probe alone.
+        provider = self._settings.llm_provider.lower()
+        if provider != "ollama":
+            return {"ok": True, "skipped": True, "reason": f"no probe for provider={provider}"}
         url = self._settings.llm_base_url.removesuffix("/v1") + "/api/tags"
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:

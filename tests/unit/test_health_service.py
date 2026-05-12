@@ -73,3 +73,27 @@ class TestHealthService:
         result = await HealthService(settings).check_all()
         assert route.called
         assert result["llm"] == {"ok": True}
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_non_ollama_provider_skips_llm_probe(self):
+        """Hosted providers (openai/anthropic/google) don't expose Ollama's
+        /api/tags and require auth on /v1/models, so the probe is skipped
+        rather than spuriously reporting ok=False."""
+        settings = Settings(
+            _env_file=None,  # pyright: ignore[reportCallIssue]
+            mcp_server_url="http://mcp.test:8080/mcp",
+            llm_provider="openai",
+            llm_base_url="https://api.openai.com/v1",
+        )
+        respx.get("http://mcp.test:8080/health").respond(status_code=200)
+        # No respx route for the LLM — if the probe ran, the test would fail
+        # with an unmatched-request error.
+
+        result = await HealthService(settings).check_all()
+        assert result["llm"] == {
+            "ok": True,
+            "skipped": True,
+            "reason": "no probe for provider=openai",
+        }
+        assert result["healthy"] is True
