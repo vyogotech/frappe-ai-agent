@@ -332,19 +332,29 @@ class ChatService:
 
         except Exception as exc:
             failed = True
+            # Unwrap ExceptionGroup (from anyio/asyncio TaskGroup) to the real
+            # cause — otherwise the FE shows the opaque outer
+            # "unhandled errors in a TaskGroup (N sub-exceptions)" instead of
+            # the actual auth/MCP/LLM failure underneath.
+            display_exc: BaseException = exc
+            while isinstance(display_exc, BaseExceptionGroup) and display_exc.exceptions:
+                display_exc = display_exc.exceptions[0]
             logger.exception(
                 "chat_handle_message_failed",
                 session_id=session_id,
                 sid_present=bool(user_context.sid),
                 error_type=type(exc).__name__,
+                root_cause_type=type(display_exc).__name__,
             )
             # Show the exception type plus the first line of its message,
             # capped at 500 chars. Full tracebacks stay in the structured
             # log, but this is an internally-authenticated agent — withholding
             # the whole error breaks debugging for no real security gain.
-            first_line = str(exc).splitlines()[0] if str(exc) else ""
+            first_line = str(display_exc).splitlines()[0] if str(display_exc) else ""
             detail = first_line[:500]
-            error_message = f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+            error_message = (
+                f"{type(display_exc).__name__}: {detail}" if detail else type(display_exc).__name__
+            )
             yield {"type": "error", "message": error_message}
 
         # Persist the final assistant message (success or error). Best-effort:
