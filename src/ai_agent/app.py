@@ -49,15 +49,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         health_service = HealthService(settings=settings)
 
-        # Register routes. The /tools REST endpoint used to report the
-        # startup-loaded tool list; tools are now per-user, so we expose an
-        # empty list as a diagnostic stub. A future phase can re-scope it
-        # behind sid auth if needed.
         app.include_router(
             create_rest_router(
                 settings=settings,
                 health_service=health_service,
-                tools=[],
             )
         )
         app.include_router(create_sse_router())
