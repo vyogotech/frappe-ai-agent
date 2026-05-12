@@ -37,10 +37,13 @@ def _sid_or_ip_key(request: Request) -> str:
     internally — it is never rendered to a browser, so the Flask-route
     XSS rule semgrep flags here doesn't apply.
     """
+    # slowapi rate-limit key — return value is never rendered to a client,
+    # so semgrep's Flask directly-returned-format-string rule (which fires
+    # below) is a false positive. nosem suppressions kept on the same lines.
     sid = request.cookies.get("sid")
     if sid and sid.strip():
-        return "sid:" + sid
-    return "ip:" + get_remote_address(request)
+        return "sid:" + sid  # nosem
+    return "ip:" + get_remote_address(request)  # nosem
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
