@@ -28,7 +28,7 @@ def health_service():
 @pytest.fixture
 def app(settings, health_service):
     app = FastAPI()
-    router = create_rest_router(settings=settings, health_service=health_service, tools=[])
+    router = create_rest_router(settings=settings, health_service=health_service)
     app.include_router(router)
     return app
 
@@ -59,12 +59,3 @@ class TestConfigEndpoint:
         assert resp.status_code == 200
         data = resp.json()
         assert data["llm_model"] == "qwen3.5:9b"
-
-
-class TestToolsEndpoint:
-    def test_tools_empty(self, client):
-        resp = client.get("/tools")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["count"] == 0
-        assert data["tools"] == []

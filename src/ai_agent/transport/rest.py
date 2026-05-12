@@ -1,9 +1,8 @@
-"""REST API endpoints for health, config, and tools."""
+"""REST API endpoints for health and config."""
 
 from __future__ import annotations
 
 from fastapi import APIRouter, Query
-from langchain_core.tools import BaseTool
 
 from ai_agent.config import Settings
 from ai_agent.services.health import HealthService
@@ -12,7 +11,6 @@ from ai_agent.services.health import HealthService
 def create_rest_router(
     settings: Settings,
     health_service: HealthService,
-    tools: list[BaseTool],
 ) -> APIRouter:
     router = APIRouter()
 
@@ -29,13 +27,6 @@ def create_rest_router(
             "llm_model": settings.llm_model,
             "llm_base_url": settings.llm_base_url,
             "mcp_server_url": settings.mcp_server_url,
-        }
-
-    @router.get("/tools")
-    async def list_tools():
-        return {
-            "count": len(tools),
-            "tools": [{"name": t.name, "description": t.description} for t in tools],
         }
 
     return router
