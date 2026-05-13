@@ -213,6 +213,61 @@ async def test_write_proceeds_without_token_when_csrf_fetch_fails():
     assert "X-Frappe-CSRF-Token" not in post.headers
 
 
+# ─── Connection reuse ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_writes_reuse_single_async_client_per_instance():
+    """Per chat turn we make 1 CSRF GET + 2-3 POST writes. Opening a
+    fresh AsyncClient for each was wasteful — every call paid a new
+    connection setup (TLS handshake when behind HTTPS) instead of
+    reusing the persistent connection. After this fix, all writes
+    from one FrappeHistoryClient instance share one underlying
+    AsyncClient — verified by patching the constructor and counting
+    instantiations."""
+    import unittest.mock as _mock
+
+    _mock_csrf_ok()
+    respx.post(_MESSAGE_URL).mock(
+        return_value=httpx.Response(200, json={"data": {"name": "msg-1"}})
+    )
+
+    real_init = httpx.AsyncClient.__init__
+    init_calls: list[dict] = []
+
+    def _spy_init(self, *args, **kwargs):
+        init_calls.append(kwargs)
+        return real_init(self, *args, **kwargs)
+
+    with _mock.patch.object(httpx.AsyncClient, "__init__", _spy_init):
+        client = FrappeHistoryClient(base_url="http://frappe:8000")
+        await client.save_message(sid="abc", session="s", role="user", content="a")
+        await client.save_message(sid="abc", session="s", role="user", content="b")
+        await client.save_message(sid="abc", session="s", role="user", content="c")
+        await client.aclose()
+
+    # One client for all four HTTP calls (1 CSRF GET + 3 POSTs).
+    assert len(init_calls) == 1, (
+        f"expected 1 AsyncClient instantiation, got {len(init_calls)}: {init_calls!r}"
+    )
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_aclose_is_idempotent():
+    """aclose() must be safe to call multiple times — the lifespan
+    teardown may run it after a context manager already cleaned up."""
+    _mock_csrf_ok()
+    respx.post(_MESSAGE_URL).mock(
+        return_value=httpx.Response(200, json={"data": {"name": "msg-1"}})
+    )
+    client = FrappeHistoryClient(base_url="http://frappe:8000")
+    await client.save_message(sid="abc", session="s", role="user", content="hi")
+    await client.aclose()
+    await client.aclose()  # idempotent — must not raise
+
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_write_proceeds_without_token_when_csrf_not_in_html():
