@@ -276,6 +276,27 @@ async def test_message_write_failure_emits_structured_event():
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_session_write_emits_history_span_with_kind(otel_spans):
+    """Each write is wrapped in an `agent.history.write` span carrying
+    a `kind` attribute, so a trace UI can show the per-kind breakdown
+    under the parent agent.chat_turn span without consulting metric
+    cardinality. `otel_spans` is the shared session-scoped exporter
+    defined in tests/unit/conftest.py."""
+    _mock_csrf_ok()
+    respx.post(_SESSION_URL).mock(
+        return_value=httpx.Response(200, json={"data": {"name": "sess-1"}})
+    )
+    client = FrappeHistoryClient(base_url="http://frappe:8000")
+    await client.create_session(sid="abc", title="t", context_json="{}")
+
+    spans = otel_spans.get_finished_spans()
+    history_spans = [s for s in spans if s.name == "agent.history.write"]
+    assert len(history_spans) == 1
+    assert dict(history_spans[0].attributes or {}).get("kind") == "session"
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_write_failures_increment_otel_counter():
     """`agent.history.write_failures` is the metric a Prometheus/OTLP
     collector scrapes to alert on Frappe-write outages. Without it, a
@@ -297,15 +318,26 @@ async def test_write_failures_increment_otel_counter():
     await client.save_message(sid="abc", session="s", role="user", content="x")
     await client.save_message(sid="abc", session="s", role="user", content="y")
 
+    # OTEL's MetricsData union (Sum / Gauge / Histogram / ExponentialHistogram)
+    # makes pyright unhappy without narrowing; we only emit a Counter so the
+    # data points are NumberDataPoint with a numeric .value. The narrowing
+    # below is type-runtime-safe; the cast quiets pyright on the union access.
+    from opentelemetry.sdk.metrics.export import MetricsData, NumberDataPoint, Sum
+
     md = reader.get_metrics_data()
+    assert isinstance(md, MetricsData)
     points: dict[str, int] = {}
     for rm in md.resource_metrics:
         for sm in rm.scope_metrics:
-            for m in sm.metrics:
-                if m.name != "agent.history.write_failures":
+            for metric in sm.metrics:
+                if metric.name != "agent.history.write_failures":
                     continue
-                for dp in m.data.data_points:
-                    kind = dict(dp.attributes).get("kind", "?")
-                    points[str(kind)] = points.get(str(kind), 0) + dp.value
+                data = metric.data
+                assert isinstance(data, Sum)
+                for dp in data.data_points:
+                    assert isinstance(dp, NumberDataPoint)
+                    attrs = dict(dp.attributes) if dp.attributes else {}
+                    kind = str(attrs.get("kind", "?"))
+                    points[kind] = points.get(kind, 0) + int(dp.value)
     assert points.get("session") == 1, f"expected 1 session failure, got {points!r}"
     assert points.get("message") == 2, f"expected 2 message failures, got {points!r}"

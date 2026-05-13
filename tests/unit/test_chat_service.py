@@ -1003,32 +1003,8 @@ async def test_handle_message_turn_summary_counts_block_events():
 
 
 # ─── Custom OTEL spans ────────────────────────────────────────────────────
-
-
-@pytest.fixture(scope="module")
-def _otel_module_exporter():
-    """Module-scoped: the OTEL global TracerProvider can only be set once
-    cleanly (later calls warn and are dropped), so one setup per module
-    keeps the warning surface to a single line and avoids fighting OTEL's
-    one-shot global. The per-test `otel_spans` fixture clears the
-    exporter between tests so each assertion sees only its own spans."""
-    from opentelemetry import trace
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    trace.set_tracer_provider(provider)
-    yield exporter
-    provider.shutdown()
-
-
-@pytest.fixture
-def otel_spans(_otel_module_exporter):
-    _otel_module_exporter.clear()
-    return _otel_module_exporter
+# `otel_spans` fixture is defined in tests/unit/conftest.py — shared
+# session-scope TracerProvider with per-test exporter clearing.
 
 
 @pytest.mark.asyncio
