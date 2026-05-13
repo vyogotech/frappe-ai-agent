@@ -113,7 +113,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         async with checkpointer_context(settings.agent_checkpointer) as saver:
             chat_service._checkpointer = saver
             logger.info("started", checkpointer=settings.agent_checkpointer)
-            yield
+            try:
+                yield
+            finally:
+                # Close the FrappeHistoryClient's shared AsyncClient so its
+                # connection pool releases TCP sockets cleanly on shutdown.
+                # Without this, the open pool keeps file descriptors alive
+                # past process exit during graceful shutdown.
+                await chat_service._history.aclose()
 
         logger.info("stopped")
 
