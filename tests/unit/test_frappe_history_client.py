@@ -270,6 +270,35 @@ async def test_aclose_is_idempotent():
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_use_after_close_raises_instead_of_leaking_new_client():
+    """Regression guard. The earlier implementation reset `_client = None`
+    on aclose() but left `_closed = True`, and `_get_client()` would
+    happily build a fresh AsyncClient on the next write — leaving
+    `_closed = True` meaning the next aclose() would return early and
+    never close that new pool. Reproduction on the prior code:
+
+        client1 = c._get_client()      # _closed=False
+        await c.aclose()               # _closed=True, _client=None
+        client2 = c._get_client()      # builds a NEW client, _closed stays True
+        await c.aclose()               # returns early, client2.is_closed=False  ← LEAK
+
+    Now `_get_client()` raises RuntimeError after close so the leak
+    is impossible. Lifespan teardown runs aclose() once at process
+    exit; any write after that is a programming error and must fail
+    loudly, not silently leak a connection pool."""
+    _mock_csrf_ok()
+    respx.post(_MESSAGE_URL).mock(
+        return_value=httpx.Response(200, json={"data": {"name": "msg-1"}})
+    )
+    client = FrappeHistoryClient(base_url="http://frappe:8000")
+    await client.save_message(sid="abc", session="s", role="user", content="hi")
+    await client.aclose()
+    with pytest.raises(RuntimeError, match="closed"):
+        await client.save_message(sid="abc", session="s", role="user", content="too-late")
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_write_proceeds_without_token_when_csrf_not_in_html():
     """If /app returns 200 but the HTML has no csrf_token JS variable,
     the client should still attempt the POST (some Frappe versions may

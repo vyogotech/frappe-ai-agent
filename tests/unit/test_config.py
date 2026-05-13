@@ -9,7 +9,7 @@ class TestSettings:
         settings = Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
         assert settings.host == "0.0.0.0"
         assert settings.port == 8484
-        assert settings.workers == 4
+        assert settings.workers == 1
         assert settings.llm_provider == "ollama"
         assert settings.llm_base_url == "http://localhost:11434"
         assert settings.llm_model == "qwen3.5:9b"

@@ -29,7 +29,11 @@ class Settings(BaseSettings):
     # Server
     host: str = "0.0.0.0"
     port: int = 8484
-    workers: int = 4
+    # Default to 1 so the checkpointer-vs-workers warning is rare and
+    # intentional (operators who pick multi-worker deliberately set this).
+    # The Dockerfile honours `${AI_AGENT_WORKERS:-1}`, so this default
+    # matches actual container behaviour.
+    workers: int = 1
     cors_origins: list[str] = ["http://localhost:8000"]
 
     @field_validator("cors_origins")
