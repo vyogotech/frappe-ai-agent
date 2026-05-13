@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncGenerator, Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -174,8 +175,14 @@ class ChatService:
         tools_called: list[str] = []
         tool_invocations: list[dict[str, Any]] = []
         assistant_text_parts: list[str] = []
+        block_events_emitted = 0
         failed = False
         error_message = ""
+        error_type: str | None = None
+        # Wall-clock timer for the turn-summary log. perf_counter is
+        # monotonic and the right primitive for a duration measurement
+        # (immune to system clock jumps).
+        t0 = time.perf_counter()
 
         # Resolve / create the history session BEFORE the graph runs so the
         # user's message and the eventual assistant reply can both be stored.
@@ -314,6 +321,8 @@ class ChatService:
                     assistant_text_parts.append(translated["text"])
                     for kind, payload in splitter.feed(translated["text"]):
                         for ev in _emit_split(kind, payload):
+                            if ev["type"] == "content_block":
+                                block_events_emitted += 1
                             yield ev
             except Exception:
                 # `except Exception` does not catch GeneratorExit (which is
@@ -321,6 +330,8 @@ class ChatService:
                 # cleanly without entering this block.
                 for kind, payload in splitter.flush():
                     for ev in _emit_split(kind, payload):
+                        if ev["type"] == "content_block":
+                            block_events_emitted += 1
                         yield ev
                 raise
 
@@ -328,10 +339,13 @@ class ChatService:
             # holding (only happens if the LLM cut off mid-tag).
             for kind, payload in splitter.flush():
                 for ev in _emit_split(kind, payload):
+                    if ev["type"] == "content_block":
+                        block_events_emitted += 1
                     yield ev
 
         except Exception as exc:
             failed = True
+            error_type = type(exc).__name__
             # Unwrap ExceptionGroup (from anyio/asyncio TaskGroup) to the real
             # cause — otherwise the FE shows the opaque outer
             # "unhandled errors in a TaskGroup (N sub-exceptions)" instead of
@@ -381,6 +395,25 @@ class ChatService:
             "data_quality": "low" if failed else "high",
             "timestamp": _utcnow_rfc3339_z(),
         }
+
+        # Single info-level audit event per turn. One log line answers
+        # "what happened on this chat call" without grepping multiple
+        # streams; failed=True funnels error_type so dashboards can
+        # bucket failures by class. Emitted after `done` so a cancelled
+        # turn (client aclose) is not summarised as completed.
+        duration_ms = (time.perf_counter() - t0) * 1000.0
+        summary: dict[str, Any] = {
+            "session_id": session_id,
+            "duration_ms": duration_ms,
+            "tools_called": tools_called,
+            "tools_called_count": len(tools_called),
+            "content_chars": sum(len(p) for p in assistant_text_parts),
+            "block_events_emitted": block_events_emitted,
+            "failed": failed,
+        }
+        if error_type is not None:
+            summary["error_type"] = error_type
+        logger.info("chat_turn_completed", **summary)
 
     # ------------------------------------------------------------------ #
     # Event translation
