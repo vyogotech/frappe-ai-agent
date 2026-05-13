@@ -7,6 +7,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- **Observability — request-id correlation.** `RequestIDMiddleware` now binds
+  the resolved `X-Request-ID` into `structlog.contextvars` for the duration of
+  the request and resets it after the response. The `merge_contextvars`
+  processor was already wired in `setup_logging`, but nothing called
+  `bind_contextvars` — handler-side logs had no `request_id`. Tests assert
+  the binding inside a handler and the reset between requests.
+- **Observability — per-turn audit log.** `ChatService.handle_message` emits a
+  single info-level `chat_turn_completed` event after the `done` SSE frame,
+  carrying `session_id`, `duration_ms`, `tools_called`, `tools_called_count`,
+  `content_chars`, `block_events_emitted`, `failed`, and `error_type` (on
+  failure). One log line answers "what happened on this chat call". Emitted
+  after `done` so a cancelled stream (client `aclose`) is not summarised
+  as completed.
+- **Observability — custom OTEL spans.** Adds three nested spans on every
+  chat turn so a trace UI can answer "where did those 18 seconds go?"
+  without consulting logs:
+  - `agent.chat_turn` — full handler; carries final turn-summary attributes
+    and sets ERROR status with `record_exception` on the failure path.
+  - `agent.load_tools` — wraps the MCP `tools/list` call. `tool_count` attribute.
+  - `agent.graph_run` — wraps the LangGraph `astream_events` loop.
+  - `agent.history.write` — wraps each Frappe REST write inside
+    `FrappeHistoryClient`. `kind` attribute (`session`/`message`),
+    `status_code` on the happy path, `failed`/`error_type` on the error path.
+  Spans are no-ops when OTEL is disabled (`trace.get_tracer` returns a
+  ProxyTracer that defers to the global provider at use-time).
+- **Observability — history-write failure counter.** OTEL counter
+  `agent.history.write_failures` with a `kind` attribute, incremented on every
+  failed Frappe REST write. Lets a Prometheus/OTLP collector alert on
+  sustained outages that the per-call WARN logs alone could not surface
+  (`rate(agent_history_write_failures_total[5m]) > 0`).
+- **Observability — structlog migration for FrappeHistoryClient.** The module
+  switched from stdlib `logging` to structlog so failures emit a consistent
+  `frappe_history_write_failed` event with `kind`, `error_type`, `error`,
+  and `status_code` fields. The CSRF fetch and retry logs gained event names
+  too (`frappe_history_csrf_fetch_failed`,
+  `frappe_history_csrf_token_rejected_refreshing`).
 - MIT `LICENSE` file at repo root (matches `pyproject.toml` declaration).
 - `AI_AGENT_AGENT_RECURSION_LIMIT` env var — was a hardcoded `50` in `chat.py`.
 - `AI_AGENT_AGENT_RATE_LIMIT` env var + slowapi-based per-sid rate limit on `POST /api/v1/chat` (default `30/minute`).
