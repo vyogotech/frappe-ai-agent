@@ -312,14 +312,25 @@ async def test_handle_message_ignores_ai_message_with_tool_calls():
 
 
 @pytest.mark.asyncio
-async def test_handle_message_yields_error_on_exception_and_still_finishes_with_done():
+async def test_handle_message_surfaces_tool_load_failure_as_tools_unavailable():
+    """Any error during MCP tool loading (other than TimeoutError, which
+    has its own message) is surfaced to the client as a clean
+    'Tools unavailable' message. The underlying cause stays in a
+    single-line warning log — no traceback, no raw exception class
+    leaked to the SSE stream."""
     service = _make_service()
     user_context = UserContext(sid="abc123")
 
     mock_client = MagicMock()
     mock_client.get_tools = AsyncMock(side_effect=RuntimeError("mcp down"))
 
-    with patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client):
+    with (
+        structlog.testing.capture_logs() as logs,
+        patch(
+            "ai_agent.services.chat.build_mcp_client_for_sid",
+            return_value=mock_client,
+        ),
+    ):
         events = await _drain(
             service.handle_message(
                 message="hi",
@@ -331,14 +342,58 @@ async def test_handle_message_yields_error_on_exception_and_still_finishes_with_
 
     error_events = [e for e in events if e["type"] == "error"]
     assert len(error_events) == 1
-    # Message is prefixed with the exception class and carries the detail
-    # (first line, truncated) so developers can actually debug.
     msg = error_events[0]["message"]
-    assert msg.startswith("RuntimeError")
-    assert "mcp down" in msg
-    # Generator still emits a terminal `done` even on failure, with low quality.
+    assert "Tools unavailable" in msg
+    # No raw exception class leaks to the client.
+    assert "RuntimeError" not in msg
+    # Generator still emits a terminal `done` even on failure.
     assert events[-1]["type"] == "done"
     assert events[-1]["data_quality"] == "low"
+
+    # Cause is captured in a single warning, not the exception-level
+    # chat_handle_message_failed log (which dumps a full traceback).
+    warns = [e for e in logs if e["event"] == "chat_tools_load_failed"]
+    assert len(warns) == 1
+    assert warns[0]["log_level"] == "warning"
+    assert warns[0]["error_type"] == "RuntimeError"
+    assert warns[0]["error"] == "mcp down"
+    assert not any(e["event"] == "chat_handle_message_failed" for e in logs)
+
+
+@pytest.mark.asyncio
+async def test_tool_load_warning_unwraps_exception_group_to_root_cause():
+    """anyio's TaskGroup wraps the real MCP error in BaseExceptionGroup
+    one or more layers deep. The warning log must surface the root cause
+    type/message, not the opaque outer wrapper."""
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    inner = RuntimeError("Session terminated")
+    group = ExceptionGroup("anyio TaskGroup", [inner])
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(side_effect=group)
+
+    with (
+        structlog.testing.capture_logs() as logs,
+        patch(
+            "ai_agent.services.chat.build_mcp_client_for_sid",
+            return_value=mock_client,
+        ),
+    ):
+        await _drain(
+            service.handle_message(
+                message="hi",
+                session_id=None,
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    warns = [e for e in logs if e["event"] == "chat_tools_load_failed"]
+    assert len(warns) == 1
+    assert warns[0]["error_type"] == "RuntimeError"
+    assert warns[0]["error"] == "Session terminated"
 
 
 @pytest.mark.asyncio

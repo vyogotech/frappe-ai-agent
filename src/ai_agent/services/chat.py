@@ -61,6 +61,16 @@ _AI_BLOCK_OPEN = "<ai-block"
 _AI_BLOCK_CLOSE = "</ai-block>"
 
 
+class _ToolsUnavailable(RuntimeError):
+    """Raised at the tool-load boundary when MCP can't serve tools.
+
+    The args carry a client-safe message. Already logged as a warning
+    at the boundary; the outer chat-turn handler must NOT re-log it as
+    an exception traceback — MCP being unreachable is a known
+    operational state, not a programming error.
+    """
+
+
 class _BlockStreamSplitter:
     """State machine that splits streamed LLM text into prose and block markup.
 
@@ -255,6 +265,26 @@ class ChatService:
                         raise RuntimeError(
                             f"MCP tools/list timed out after {_MCP_TOOLS_LOAD_TIMEOUT_S:.0f}s"
                         ) from exc
+                    except Exception as exc:
+                        # MCP server unreachable / refusing the handshake /
+                        # returning errors. Unwrap ExceptionGroup (anyio
+                        # TaskGroup wraps the real cause one or more layers
+                        # deep) so the warning log records the root type
+                        # and message, not the opaque outer wrapper.
+                        root: BaseException = exc
+                        while isinstance(root, BaseExceptionGroup) and root.exceptions:
+                            root = root.exceptions[0]
+                        logger.warning(
+                            "chat_tools_load_failed",
+                            session_id=session_id,
+                            error_type=type(root).__name__,
+                            error=str(root)[:200],
+                        )
+                        load_span.set_attribute("failed", True)
+                        load_span.set_attribute("error_type", type(root).__name__)
+                        raise _ToolsUnavailable(
+                            "Tools unavailable: cannot reach the MCP server."
+                        ) from exc
                     load_span.set_attribute("tool_count", len(tools))
 
                 # Install an error handler on every tool so exceptions raised
@@ -368,6 +398,30 @@ class ChatService:
                                 block_events_emitted += 1
                             yield ev
 
+            except _ToolsUnavailable as exc:
+                # Tool-load boundary already emitted a single-line WARNING
+                # with the underlying cause; surfacing a full traceback
+                # here would double-log a known operational state. Just
+                # mark the turn failed and yield the pre-baked
+                # client-safe message. Use the underlying cause's class
+                # for error_type so the turn summary + span attrs let
+                # operators bucket by real failure mode (McpError,
+                # ConnectError, ...) instead of the internal wrapper.
+                failed = True
+                root_cause: BaseException | None = exc.__cause__
+                while (
+                    isinstance(root_cause, BaseExceptionGroup)
+                    and root_cause.exceptions
+                ):
+                    root_cause = root_cause.exceptions[0]
+                error_type = (
+                    type(root_cause).__name__
+                    if root_cause is not None
+                    else type(exc).__name__
+                )
+                turn_span.set_status(Status(StatusCode.ERROR, error_type))
+                error_message = str(exc)
+                yield {"type": "error", "message": error_message}
             except Exception as exc:
                 failed = True
                 error_type = type(exc).__name__
