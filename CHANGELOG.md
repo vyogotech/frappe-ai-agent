@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - `AI_AGENT_AGENT_RATE_LIMIT` env var + slowapi-based per-sid rate limit on `POST /api/v1/chat` (default `30/minute`).
 - 8 KB cap on the `context` payload of `ChatRequest` to bound prompt growth.
 - Startup-time rejection of `cors_origins=["*"]` (incompatible with `allow_credentials=True`).
-- New CI job `integration` (manual `workflow_dispatch`) running `pytest -m integration` against external services.
+- New CI job `integration` runs on every push to `main`, spinning up MariaDB + Redis services, a real Frappe v15 bench with the `frappe_ai` app installed, the `frappe-mcp-server` Go binary built from source, and a containerised Ollama (`qwen3:0.6b`). Three integration tests exercise the LLM, MCP, and Frappe-history boundaries end-to-end via the Administrator sid.
 
 ### Changed
 - Routers and services are now wired at `create_app` time instead of inside the `lifespan` context manager — `app.routes` is populated before first request.
@@ -24,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - `tests/` cleared of latent pyright errors and re-enabled in the type-check pass.
 - `chat.py` module docstring now enumerates all seven SSE event types (`session`, `status`, `tool_call`, `content`, `content_block`, `error`, `done`) — previously omitted `session` and `content_block`.
 - `.env.example` defaults synced to code: `LLM_TEMPERATURE=0.2`, `LLM_MAX_TOKENS=8192`, plus new `LLM_NUM_CTX=16384`.
+- `FrappeHistoryClient.create_session` now supplies a UUID-based `name` in the POST payload. The `AI Chat Session` DocType is declared `autoname: "prompt"`, so Frappe rejected nameless writes with a 417 "Please set the document name" — every first-turn session creation would have silently failed in production. Surfaced by the new integration test.
 
 ### Removed
 - `/tools` stub REST endpoint (was returning placeholder data).
