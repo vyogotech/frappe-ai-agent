@@ -5,10 +5,12 @@ forwarding the caller's Frappe sid cookie. Errors are swallowed and logged —
 a Frappe outage must NOT abort the conversation.
 
 CSRF handling: Frappe protects state-changing REST endpoints with a CSRF
-token. Frappe v17 embeds the token as a JS variable inside the rendered
-`/app` HTML page (`csrf_token = "<hex>"`), NOT as a response header.
-We GET `/app`, regex out the token, cache it per sid, and attach it
-as `X-Frappe-CSRF-Token` on every write. If a write fails with a CSRF
+token. The token is embedded as a JS variable inside the rendered `/app`
+HTML page (`csrf_token = "<hex>"`), NOT as a response header. Verified
+against Frappe v15 (which CI pins via FRAPPE_BRANCH: version-15); the
+same pattern is reported on v16, but we test only v15. We GET `/app`,
+regex out the token, cache it per sid, and attach it as
+`X-Frappe-CSRF-Token` on every write. If a write fails with a CSRF
 error we invalidate the cache so the next call re-fetches.
 """
 
@@ -174,9 +176,10 @@ class FrappeHistoryClient:
     async def _fetch_csrf_token(self, sid: str) -> str | None:
         """GET /app and extract the CSRF token from the rendered HTML.
 
-        Frappe v17 embeds the token as `csrf_token = "<hex>"` inline in
-        the desk page JavaScript. Following redirects lets us land on
-        the real desk page even if /app redirects.
+        Frappe embeds the token as `csrf_token = "<hex>"` inline in the
+        desk page JavaScript (verified on v15 in the integration CI).
+        Following redirects lets us land on the real desk page even if
+        /app redirects.
 
         Returns None on any failure so callers can still attempt the write
         (Frappe will return a clear 400 CSRFTokenError we log downstream).
