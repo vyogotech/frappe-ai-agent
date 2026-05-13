@@ -32,4 +32,14 @@ services:
     ports:
       - "8484:8484"
     env_file: .env
+    # Inside the compose network, the mcp service is reachable as "mcp"
+    # on its container port (8080). .env.example documents
+    # AI_AGENT_MCP_SERVER_URL=http://localhost:8080/mcp for laptop dev;
+    # override here so the agent container talks to the mcp container
+    # instead of trying to dial out of its own localhost. Likewise for
+    # AI_AGENT_FRAPPE_URL if you run Frappe inside the compose net —
+    # use the service name there, not localhost.
+    environment:
+      AI_AGENT_MCP_SERVER_URL: "http://mcp:8080/mcp"
+      # AI_AGENT_FRAPPE_URL: "http://host.docker.internal:8000"  # if Frappe runs on the host
     restart: unless-stopped

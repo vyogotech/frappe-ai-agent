@@ -7,6 +7,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
+- **Typed SSE event contract** in `src/ai_agent/transport/sse_events.py`:
+  seven `TypedDict`s (`SessionEvent`, `StatusEvent`, `ToolCallEvent`,
+  `ContentEvent`, `ContentBlockEvent`, `ErrorEvent`, `DoneEvent`) plus the
+  `SSEEvent` union — the wire contract a frontend can mirror in TypeScript.
+  New `validate_event(event)` raises `ValueError` on any drift; a
+  `test_every_emitted_event_matches_sse_contract` test in `test_chat_service.py`
+  drains a real chat turn and validates every event the service emits, so
+  contract drift is caught at CI rather than in a FE bug report.
+- **Operational runbook** in the README covering chat 500s, MCP health
+  failures, silent Frappe history loss, multi-worker conversation amnesia,
+  rate-limit 429s, recursion-limit hits, and SSE stream hangs — each with
+  the structured log events, OTEL spans, and remediations to consult.
 - MIT `LICENSE` file at repo root (matches `pyproject.toml` declaration).
 - `AI_AGENT_AGENT_RECURSION_LIMIT` env var — was a hardcoded `50` in `chat.py`.
 - `AI_AGENT_AGENT_RATE_LIMIT` env var + slowapi-based per-sid rate limit on `POST /api/v1/chat` (default `30/minute`).
@@ -20,6 +32,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - CI `test` job now includes `tests/features/` (BDD smoke scenarios) alongside `tests/unit/`.
 
 ### Fixed
+- **Incorrect Frappe v17 references.** `FrappeHistoryClient` docstrings
+  claimed the CSRF embed pattern was specific to "Frappe v17", but v17 does
+  not exist — Frappe's latest releases are v15 and v16. CI pins v15, which is
+  the only version we actually verify. Docstrings now say so plainly.
+- **`docker-compose.dev.yml.example`** sets
+  `AI_AGENT_MCP_SERVER_URL: http://mcp:8080/mcp` on the agent service so the
+  agent container reaches the mcp service over the compose network instead
+  of trying to dial its own localhost. The `.env.example` default
+  (`http://localhost:8080/mcp`) is right for laptop dev but wrong inside
+  compose.
 - Health probe skips the `/api/tags` call for non-Ollama LLM providers (OpenAI / Anthropic / Google have no public model-list endpoint we want to hit).
 - `tests/` cleared of latent pyright errors and re-enabled in the type-check pass.
 - `chat.py` module docstring now enumerates all seven SSE event types (`session`, `status`, `tool_call`, `content`, `content_block`, `error`, `done`) — previously omitted `session` and `content_block`.
