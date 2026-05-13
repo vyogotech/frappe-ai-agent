@@ -247,8 +247,16 @@ uv run pytest --cov=ai_agent           # coverage
 ## Observability
 
 - **Structured logging** via `structlog`. Default JSON output to stdout; switch to a human-readable renderer with `AI_AGENT_LOG_FORMAT=console`. `uvicorn.access`, `httpx`, and `httpcore` are pinned to WARNING to keep the stream readable.
-- **Request correlation** — every response carries an `X-Request-ID` header; clients can pin a value by sending the same header.
-- **OpenTelemetry** — set `AI_AGENT_OTEL_ENDPOINT` to an OTLP gRPC collector to enable FastAPI instrumentation and span export. Empty endpoint = tracing off (no exporter wired in).
+- **Request correlation** — every response carries an `X-Request-ID` header (incoming value echoed if the client sets one, otherwise a fresh UUID). The same id is bound into `structlog.contextvars` for the duration of the request, so any log emitted inside a handler carries `request_id=…` automatically.
+- **Per-turn audit log** — `ChatService.handle_message` emits one info-level `chat_turn_completed` event at the end of every turn with `duration_ms`, `tools_called`, `content_chars`, `block_events_emitted`, `failed`, `session_id`, and `error_type` on failure. One log line per turn answers "what happened on this chat call" without grepping multiple streams.
+- **OpenTelemetry tracing** — set `AI_AGENT_OTEL_ENDPOINT` to an OTLP gRPC collector to enable export. Tracing is off when the env var is empty. Spans emitted per chat turn (nested under the FastAPI auto-instrumented HTTP span):
+  - `agent.chat_turn` (the whole handler — `session_id`, `tools_called_count`, `content_chars`, `block_events_emitted`, `failed`, `error_type`)
+  - `agent.load_tools` (MCP `tools/list` call — `tool_count`)
+  - `agent.graph_run` (LangGraph `astream_events` loop)
+  - `agent.history.write` (each Frappe REST write — `kind`, `status_code`, `failed`)
+
+  On the failure path the `agent.chat_turn` span carries an ERROR status and the original exception via `record_exception`, so a trace UI bubbles it up.
+- **OpenTelemetry metrics** — the OTEL Metrics API is wired with one counter: `agent.history.write_failures` (attribute `kind=session|message`). Lets a Prometheus/OTLP collector alert on sustained Frappe-write outages (e.g. `rate(agent_history_write_failures_total[5m]) > 0`) that the per-call WARN logs alone could not surface.
 
 ## Docker
 
