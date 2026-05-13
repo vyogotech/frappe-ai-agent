@@ -213,6 +213,32 @@ async def test_write_proceeds_without_token_when_csrf_fetch_fails():
     assert "X-Frappe-CSRF-Token" not in post.headers
 
 
+def test_looks_like_csrf_error_returns_false_when_text_access_raises():
+    """The helper reads `response.text` which can in pathological cases
+    raise (e.g. malformed encoding declarations). The except branch
+    must swallow the exception and return False — a non-CSRF error
+    should fall through to the standard write-failed handling, not
+    trigger an unbounded retry loop."""
+    import httpx
+
+    from ai_agent.integrations.frappe_history import _looks_like_csrf_error
+
+    class _ExplodingResponse:
+        @property
+        def text(self) -> str:
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    # _looks_like_csrf_error is duck-typed against `response.text` so a
+    # stand-in that raises on .text drives the exception arm cleanly.
+    assert _looks_like_csrf_error(_ExplodingResponse()) is False  # type: ignore[arg-type]
+
+    # Sanity: the happy-path branches still work.
+    ok_response = httpx.Response(400, json={"exc_type": "CSRFTokenError"})
+    assert _looks_like_csrf_error(ok_response) is True
+    not_csrf = httpx.Response(400, json={"exc_type": "ValidationError"})
+    assert _looks_like_csrf_error(not_csrf) is False
+
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_write_proceeds_without_token_when_csrf_not_in_html():
