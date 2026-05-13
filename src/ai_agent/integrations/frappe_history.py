@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import re
 from typing import Any
+from uuid import uuid4
 
 import httpx
 
@@ -49,9 +50,18 @@ class FrappeHistoryClient:
         """Create an AI Chat Session owned by the caller.
 
         Returns the created document's name, or None on any failure.
+
+        The AI Chat Session DocType is declared ``autoname: "prompt"`` —
+        Frappe requires callers to supply the row's primary key. Generate a
+        UUID-based name here so the resulting id is opaque to the user and
+        collision-free across concurrent first turns.
         """
         url = f"{self._base_url}{_SESSION_URL_PATH}"
-        payload = {"title": title, "context_json": context_json}
+        payload = {
+            "name": f"chat-{uuid4().hex}",
+            "title": title,
+            "context_json": context_json,
+        }
         return await self._post_and_extract_name(url, payload, sid, "session")
 
     async def ensure_session(

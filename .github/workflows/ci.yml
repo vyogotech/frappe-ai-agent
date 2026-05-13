@@ -222,27 +222,6 @@ jobs:
       - name: Install agent deps
         run: uv sync --all-extras
 
-      - name: Debug — POST a session directly and dump response
-        # If the integration test fails, surfacing the raw 4xx body shaves
-        # iterations: Frappe's REST returns `_server_messages` JSON in the
-        # body with the actual validation reason (mandatory field, etc.).
-        run: |
-          set -x
-          COOKIE_JAR=$(mktemp)
-          curl -sf -c "$COOKIE_JAR" \
-            -d "usr=Administrator&pwd=admin" \
-            http://localhost:8000/api/method/login > /dev/null
-          CSRF=$(curl -sf -b "$COOKIE_JAR" -L http://localhost:8000/app | \
-                 grep -oE 'csrf_token = "[0-9a-fA-F]+"' | head -1 | \
-                 sed -E 's/csrf_token = "([0-9a-fA-F]+)"/\1/')
-          echo "Got CSRF token: ${CSRF:0:8}..."
-          echo "---POST /api/resource/AI Chat Session---"
-          curl -i -b "$COOKIE_JAR" \
-            -H "X-Frappe-CSRF-Token: $CSRF" \
-            -H "Content-Type: application/json" \
-            -d '{"title":"ci-debug","context_json":"{}"}' \
-            "http://localhost:8000/api/resource/AI%20Chat%20Session" || true
-
       - name: Run integration tests
         env:
           AI_AGENT_INTEGRATION_LLM_BASE_URL: http://localhost:11434
