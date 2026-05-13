@@ -50,6 +50,15 @@ class FrappeHistoryClient:
         self._closed = False
 
     def _get_client(self) -> httpx.AsyncClient:
+        # Raise after aclose() rather than silently building a new pool:
+        # the earlier shape (return a fresh client while leaving
+        # `_closed = True`) leaked the new pool because the next
+        # aclose() short-circuited on the stale flag. Programming
+        # errors here must be loud, not silent resource leaks.
+        if self._closed:
+            raise RuntimeError(
+                "FrappeHistoryClient is closed; build a new instance for further writes"
+            )
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=self._timeout, follow_redirects=True)
         return self._client
@@ -161,8 +170,10 @@ class FrappeHistoryClient:
         (Frappe will return a clear 400 CSRFTokenError we log downstream).
         """
         url = f"{self._base_url}{_CSRF_URL_PATH}"
+        # Same closed-check positioning as _post_and_extract_name:
+        # outside the try so use-after-close raises cleanly.
+        client = self._get_client()
         try:
-            client = self._get_client()
             response = await client.get(
                 url,
                 headers={"Cookie": f"sid={sid}"},
@@ -196,13 +207,20 @@ class FrappeHistoryClient:
         sid: str,
         kind: str,
     ) -> str | None:
+        # Establish the client (or raise RuntimeError on a closed
+        # instance) BEFORE the try/except below. That except swallows
+        # everything to keep chat turns alive on Frappe outages, but
+        # a programming error (use-after-close) must propagate
+        # cleanly so it surfaces as a test failure or 500 instead of
+        # silently swallowing the write.
+        client = self._get_client()
+
         csrf_token = await self._csrf_token_for(sid)
         headers: dict[str, str] = {"Cookie": f"sid={sid}"}
         if csrf_token:
             headers[_CSRF_HEADER] = csrf_token
 
         try:
-            client = self._get_client()
             response = await client.post(url, json=payload, headers=headers)
 
             if response.status_code == 400 and _looks_like_csrf_error(response):

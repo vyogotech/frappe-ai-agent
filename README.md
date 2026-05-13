@@ -133,7 +133,7 @@ All settings are loaded from environment or `.env` with the `AI_AGENT_` prefix. 
 |----------|---------|-------------|
 | `AI_AGENT_HOST` | `0.0.0.0` | Bind host |
 | `AI_AGENT_PORT` | `8484` | Bind port |
-| `AI_AGENT_WORKERS` | `4` | Uvicorn workers (production) |
+| `AI_AGENT_WORKERS` | `1` | Uvicorn workers. Wired into the Dockerfile CMD as `uvicorn --workers ${AI_AGENT_WORKERS:-1}`. Raise above 1 only with a shared checkpointer (see `AI_AGENT_AGENT_CHECKPOINTER`). |
 | `AI_AGENT_CORS_ORIGINS` | `["http://localhost:8000"]` | JSON list of credentialed-CORS origins. `"*"` is not allowed because cookies are forwarded |
 | `AI_AGENT_LLM_PROVIDER` | `ollama` | `ollama`, `openai`, `anthropic`, `google` |
 | `AI_AGENT_LLM_BASE_URL` | `http://localhost:11434` | Provider base URL |
@@ -173,7 +173,7 @@ Every loaded tool is wrapped by `install_tool_error_handler` so that any excepti
 
 ## Multi-worker deployments
 
-The LangGraph agent keeps per-conversation state in a *checkpointer* — the same thread id (== Frappe chat session id) replays the conversation history on the next turn. The default `AI_AGENT_AGENT_CHECKPOINTER=memory` is process-local, which means with the default `AI_AGENT_WORKERS=4` a follow-up turn has a 1-in-4 chance of landing on the worker that has the prior checkpoint and a 3-in-4 chance of getting a fresh thread state. The LLM "forgets" what was said even though the Frappe history rows preserve it for the UI scrollback.
+The LangGraph agent keeps per-conversation state in a *checkpointer* — the same thread id (== Frappe chat session id) replays the conversation history on the next turn. The default `AI_AGENT_AGENT_CHECKPOINTER=memory` is process-local. With the default `AI_AGENT_WORKERS=1` (single worker) this is fine. Raise `AI_AGENT_WORKERS` above 1 and a follow-up turn has a 1-in-N chance of landing on the worker that has the prior checkpoint — the LLM "forgets" what was said even though the Frappe history rows preserve it for the UI scrollback.
 
 If you run with `workers > 1`, set a shared backend:
 
