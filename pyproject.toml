@@ -39,7 +39,7 @@ dev = [
     "pytest-bdd>=7.0",
     "pytest-cov>=6.0",
     "ruff>=0.8",
-    "pyright>=1.1",
+    "pyright>=1.1.409",
     "respx>=0.21",
 ]
 
