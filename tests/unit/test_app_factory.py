@@ -127,3 +127,48 @@ class TestCreateApp:
         with TestClient(app) as client:
             client.get("/health")
             assert isinstance(app.state.chat_service._checkpointer, AsyncSqliteSaver)
+
+    def test_sid_or_ip_key_falls_back_to_ip_when_sid_missing(self):
+        """`_sid_or_ip_key` is the slowapi key function. On the chat
+        route a missing sid 401s before the key function runs, but the
+        IP fallback is the safety net for any future @limit-decorated
+        route without a sid-required dependency. Tested directly here
+        because no current route exercises the fallback path."""
+        from starlette.requests import Request
+
+        from ai_agent.app import _sid_or_ip_key
+
+        # No cookie header → IP fallback.
+        scope_no_sid = {
+            "type": "http",
+            "method": "GET",
+            "path": "/",
+            "headers": [],
+            "client": ("203.0.113.42", 12345),
+        }
+        key = _sid_or_ip_key(Request(scope_no_sid))  # type: ignore[arg-type]
+        assert key.startswith("ip:"), key
+        assert "203.0.113.42" in key
+
+        # Whitespace-only sid is treated as missing (the same rule
+        # extract_user_context applies for the auth path).
+        scope_whitespace_sid = {
+            "type": "http",
+            "method": "GET",
+            "path": "/",
+            "headers": [(b"cookie", b"sid=   ")],
+            "client": ("203.0.113.42", 12345),
+        }
+        key_ws = _sid_or_ip_key(Request(scope_whitespace_sid))  # type: ignore[arg-type]
+        assert key_ws.startswith("ip:"), key_ws
+
+        # Sanity: a real sid → "sid:" prefix.
+        scope_with_sid = {
+            "type": "http",
+            "method": "GET",
+            "path": "/",
+            "headers": [(b"cookie", b"sid=real-sid-value")],
+            "client": ("203.0.113.42", 12345),
+        }
+        key_sid = _sid_or_ip_key(Request(scope_with_sid))  # type: ignore[arg-type]
+        assert key_sid == "sid:real-sid-value"
