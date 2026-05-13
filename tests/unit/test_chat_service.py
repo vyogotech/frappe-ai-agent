@@ -1193,3 +1193,96 @@ def test_splitter_flush_emits_residual_partial_block():
     assert len(flushed) == 1
     assert flushed[0][0] == "content"
     assert flushed[0][1].startswith("<ai-block")
+
+
+# ─── SSE contract enforcement ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_every_emitted_event_matches_sse_contract():
+    """Walk a chat turn that exercises tool_call, content, content_block,
+    and done events; run validate_event on each. This is the
+    regression guard for "someone added a new event field and forgot
+    to update the TypedDict in transport/sse_events.py" drift."""
+    from ai_agent.transport.sse_events import validate_event
+
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    final_text = (
+        "Customer count:\n"
+        '<ai-block type="kpi">'
+        '{"metrics": [{"label": "Total", "value": 42, "format": "number"}]}'
+        "</ai-block>"
+    )
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(return_value=[])
+    mock_graph = MagicMock()
+    mock_graph.astream_events = _StreamFactory(
+        [
+            {
+                "event": "on_tool_start",
+                "name": "list_documents",
+                "data": {"input": {"doctype": "Customer"}},
+            },
+            {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": AIMessageChunk(content=final_text)},
+            },
+        ]
+    )
+
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.create_agent_graph", return_value=mock_graph),
+    ):
+        events = await _drain(
+            service.handle_message(
+                message="count customers",
+                session_id="s-contract",
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    # Every event the service emitted must satisfy the SSE contract.
+    # validate_event raises on drift; the test passes only if all events
+    # validate clean. The kinds we expect to see at least once across
+    # this scenario:
+    seen_kinds = set()
+    for ev in events:
+        validate_event(ev)
+        seen_kinds.add(ev["type"])
+    assert {"session", "tool_call", "content", "content_block", "done"} <= seen_kinds, (
+        f"scenario didn't exercise all expected kinds: got {seen_kinds!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_error_path_events_match_sse_contract():
+    """The failure branch emits `error` + `done`. Both must satisfy the
+    contract."""
+    from ai_agent.transport.sse_events import validate_event
+
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(side_effect=RuntimeError("mcp down"))
+
+    with patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client):
+        events = await _drain(
+            service.handle_message(
+                message="hi",
+                session_id="s-err",
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    seen_kinds = set()
+    for ev in events:
+        validate_event(ev)
+        seen_kinds.add(ev["type"])
+    assert {"session", "error", "done"} <= seen_kinds
