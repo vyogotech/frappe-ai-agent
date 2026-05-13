@@ -30,6 +30,8 @@ import structlog
 from langchain_core.messages import AIMessageChunk, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.schema import StreamEvent
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
 
 from ai_agent.agent.graph import create_agent_graph
 from ai_agent.agent.prompts import build_system_prompt
@@ -41,6 +43,7 @@ from ai_agent.integrations.mcp import build_mcp_client_for_sid
 from ai_agent.middleware.sid import UserContext
 
 logger = structlog.get_logger(__name__)
+_tracer = trace.get_tracer(__name__)
 
 
 SystemPromptBuilder = Callable[[dict[str, Any]], str]
@@ -184,236 +187,283 @@ class ChatService:
         # (immune to system clock jumps).
         t0 = time.perf_counter()
 
-        # Resolve / create the history session BEFORE the graph runs so the
-        # user's message and the eventual assistant reply can both be stored.
-        # If Frappe is unreachable, fall back to a client-side id so the rest
-        # of the request still works; the history is just lost for this turn.
-        if session_id is None:
-            created = await self._history.create_session(
+        # `agent.chat_turn` wraps the entire turn. Inner spans
+        # (load_tools, graph_run) nest under it so a trace UI shows the
+        # anatomy at a glance: "the 18s turn was 0.8s load_tools +
+        # 16.9s graph_run + 0.3s history writes". get_tracer returns a
+        # ProxyTracer that defers to the global provider at use-time,
+        # so this is a no-op when OTEL is disabled.
+        with _tracer.start_as_current_span("agent.chat_turn") as turn_span:
+            # Resolve / create the history session BEFORE the graph runs so
+            # the user's message and the eventual assistant reply can both
+            # be stored. If Frappe is unreachable, fall back to a
+            # client-side id so the rest of the request still works; the
+            # history is just lost for this turn.
+            if session_id is None:
+                created = await self._history.create_session(
+                    sid=user_context.sid,
+                    title=_derive_title(message),
+                    context_json=json.dumps(context or {}),
+                )
+                if created is None:
+                    session_id = f"tmp-{uuid4().hex[:8]}"
+                    logger.warning(
+                        "chat_history_session_create_failed_using_tmp",
+                        session_id=session_id,
+                    )
+                else:
+                    session_id = created
+            else:
+                # Caller supplied an id (e.g. Frappe forwarded the browser's
+                # conversation id). Ensure a matching AI Chat Session row
+                # exists so the upcoming save_message calls' Link validation
+                # doesn't 417. Idempotent: a duplicate-name create is
+                # treated as success.
+                await self._history.ensure_session(
+                    sid=user_context.sid,
+                    name=session_id,
+                    title=_derive_title(message),
+                    context_json=json.dumps(context or {}),
+                )
+
+            turn_span.set_attribute("session_id", session_id)
+
+            # Announce the session id so the frontend can remember it and
+            # pass it back on subsequent messages in the same conversation.
+            # Without this round-trip every user message would land in a
+            # brand-new AI Chat Session row.
+            yield {"type": "session", "id": session_id}
+
+            # Persist the user's message. Best-effort; failures do not abort.
+            await self._history.save_message(
                 sid=user_context.sid,
-                title=_derive_title(message),
-                context_json=json.dumps(context or {}),
+                session=session_id,
+                role="user",
+                content=message,
             )
-            if created is None:
-                session_id = f"tmp-{uuid4().hex[:8]}"
-                logger.warning(
-                    "chat_history_session_create_failed_using_tmp",
+
+            try:
+                # Per-request MCP client carrying the caller's sid cookie.
+                mcp_client = build_mcp_client_for_sid(self._settings, user_context.sid)
+                with _tracer.start_as_current_span("agent.load_tools") as load_span:
+                    try:
+                        tools = await asyncio.wait_for(
+                            mcp_client.get_tools(),
+                            timeout=_MCP_TOOLS_LOAD_TIMEOUT_S,
+                        )
+                    except TimeoutError as exc:
+                        raise RuntimeError(
+                            f"MCP tools/list timed out after {_MCP_TOOLS_LOAD_TIMEOUT_S:.0f}s"
+                        ) from exc
+                    load_span.set_attribute("tool_count", len(tools))
+
+                # Install an error handler on every tool so exceptions raised
+                # by individual tool calls become LLM-visible tool
+                # observations instead of aborting the whole graph run.
+                # `install_tool_error_handler` both wraps the coroutine (so
+                # non-ToolException errors are re-raised as ToolException)
+                # and sets `handle_tool_error` — both are needed because
+                # LangChain's built-in hook only catches ToolException, and
+                # MCP/Frappe errors don't subclass it.
+                for tool in tools:
+                    install_tool_error_handler(tool)
+
+                logger.debug(
+                    "chat_tools_loaded",
+                    count=len(tools),
                     session_id=session_id,
                 )
-            else:
-                session_id = created
-        else:
-            # Caller supplied an id (e.g. Frappe forwarded the browser's
-            # conversation id). Ensure a matching AI Chat Session row exists
-            # so the upcoming save_message calls' Link validation doesn't
-            # 417. Idempotent: a duplicate-name create is treated as success.
-            await self._history.ensure_session(
-                sid=user_context.sid,
-                name=session_id,
-                title=_derive_title(message),
-                context_json=json.dumps(context or {}),
-            )
 
-        # Announce the session id so the frontend can remember it and
-        # pass it back on subsequent messages in the same conversation.
-        # Without this round-trip every user message would land in a
-        # brand-new AI Chat Session row.
-        yield {"type": "session", "id": session_id}
+                # Per-request prompt lets the UI pass page context per message.
+                system_prompt = self._build_system_prompt(context or {})
 
-        # Persist the user's message. Best-effort; failures do not abort.
-        await self._history.save_message(
-            sid=user_context.sid,
-            session=session_id,
-            role="user",
-            content=message,
-        )
-
-        try:
-            # Per-request MCP client carrying the caller's sid cookie.
-            mcp_client = build_mcp_client_for_sid(self._settings, user_context.sid)
-            try:
-                tools = await asyncio.wait_for(
-                    mcp_client.get_tools(),
-                    timeout=_MCP_TOOLS_LOAD_TIMEOUT_S,
+                # Cheap: create_react_agent just wires a graph around the model
+                # and tool list. No network calls here.
+                graph = create_agent_graph(
+                    llm=self._llm,
+                    tools=tools,
+                    system_prompt=system_prompt,
+                    checkpointer=self._checkpointer,
                 )
-            except TimeoutError as exc:
-                raise RuntimeError(
-                    f"MCP tools/list timed out after {_MCP_TOOLS_LOAD_TIMEOUT_S:.0f}s"
-                ) from exc
 
-            # Install an error handler on every tool so exceptions raised by
-            # individual tool calls become LLM-visible tool observations
-            # instead of aborting the whole graph run. `install_tool_error_handler`
-            # both wraps the coroutine (so non-ToolException errors are
-            # re-raised as ToolException) and sets `handle_tool_error` —
-            # both are needed because LangChain's built-in hook only catches
-            # ToolException, and MCP/Frappe errors don't subclass it.
-            for tool in tools:
-                install_tool_error_handler(tool)
+                graph_input = {"messages": [HumanMessage(content=message)]}
+                graph_config: RunnableConfig = {
+                    "configurable": {"thread_id": session_id},
+                    # Why (default 50): smaller local models loop while
+                    # exploring doctype schemas and trip the LangGraph
+                    # default of 25 before converging. Configurable via
+                    # AI_AGENT_AGENT_RECURSION_LIMIT.
+                    "recursion_limit": self._settings.agent_recursion_limit,
+                }
 
-            logger.debug(
-                "chat_tools_loaded",
-                count=len(tools),
-                session_id=session_id,
-            )
+                # Splitter buffers `<ai-block>...</ai-block>` markup across
+                # token chunks so the FE never sees partial HTML. Prose
+                # tokens stream through; complete block tags are parsed and
+                # emitted as content_block events that the FE renders via
+                # getBlockComponent.
+                splitter = _BlockStreamSplitter()
 
-            # Per-request prompt lets the UI pass page context per message.
-            system_prompt = self._build_system_prompt(context or {})
+                def _emit_split(kind: str, payload: str):
+                    if kind == "content":
+                        return [{"type": "content", "text": payload}]
+                    # Block markup. parse_blocks may return TextBlock
+                    # segments if the LLM nested prose-like content inside
+                    # the tag; emit those as plain content too so the FE
+                    # markdown path picks them up.
+                    events_out: list[dict[str, Any]] = []
+                    for block in parse_blocks(payload):
+                        if block.type == "text":
+                            events_out.append({"type": "content", "text": block.content})
+                        else:
+                            events_out.append(
+                                {"type": "content_block", "block": block.model_dump()}
+                            )
+                    return events_out
 
-            # Cheap: create_react_agent just wires a graph around the model
-            # and tool list. No network calls here.
-            graph = create_agent_graph(
-                llm=self._llm,
-                tools=tools,
-                system_prompt=system_prompt,
-                checkpointer=self._checkpointer,
-            )
+                # We deliberately flush in the success path AND in an except
+                # clause that re-raises — NOT in a `finally`. Yielding from
+                # `finally` raises RuntimeError("async generator ignored
+                # GeneratorExit") when the consumer (Starlette) calls
+                # `aclose()` on client disconnect, which is common whenever
+                # the splitter has buffered content (partial open-tag suffix
+                # or in-block markup).
+                with _tracer.start_as_current_span("agent.graph_run"):
+                    try:
+                        async for event in graph.astream_events(
+                            graph_input,
+                            config=graph_config,
+                            version="v2",
+                        ):
+                            translated = self._translate_event(
+                                event, tools_called, tool_invocations
+                            )
+                            if translated is None:
+                                continue
+                            if translated["type"] != "content":
+                                yield translated
+                                continue
+                            assistant_text_parts.append(translated["text"])
+                            for kind, payload in splitter.feed(translated["text"]):
+                                for ev in _emit_split(kind, payload):
+                                    if ev["type"] == "content_block":
+                                        block_events_emitted += 1
+                                    yield ev
+                    except Exception:
+                        # `except Exception` does not catch GeneratorExit
+                        # (which is BaseException), so client-disconnect
+                        # cleanup propagates cleanly without entering this
+                        # block.
+                        for kind, payload in splitter.flush():
+                            for ev in _emit_split(kind, payload):
+                                if ev["type"] == "content_block":
+                                    block_events_emitted += 1
+                                yield ev
+                        raise
 
-            graph_input = {"messages": [HumanMessage(content=message)]}
-            graph_config: RunnableConfig = {
-                "configurable": {"thread_id": session_id or "default"},
-                # Why (default 50): smaller local models loop while exploring
-                # doctype schemas and trip the LangGraph default of 25 before
-                # converging. Configurable via AI_AGENT_AGENT_RECURSION_LIMIT.
-                "recursion_limit": self._settings.agent_recursion_limit,
-            }
-
-            # Splitter buffers `<ai-block>...</ai-block>` markup across token
-            # chunks so the FE never sees partial HTML. Prose tokens stream
-            # through; complete block tags are parsed and emitted as
-            # content_block events that the FE renders via getBlockComponent.
-            splitter = _BlockStreamSplitter()
-
-            def _emit_split(kind: str, payload: str):
-                if kind == "content":
-                    return [{"type": "content", "text": payload}]
-                # Block markup. parse_blocks may return TextBlock segments
-                # if the LLM nested prose-like content inside the tag; emit
-                # those as plain content too so the FE markdown path
-                # picks them up.
-                events_out: list[dict[str, Any]] = []
-                for block in parse_blocks(payload):
-                    if block.type == "text":
-                        events_out.append({"type": "content", "text": block.content})
-                    else:
-                        events_out.append({"type": "content_block", "block": block.model_dump()})
-                return events_out
-
-            # We deliberately flush in the success path AND in an except
-            # clause that re-raises — NOT in a `finally`. Yielding from
-            # `finally` raises RuntimeError("async generator ignored
-            # GeneratorExit") when the consumer (Starlette) calls
-            # `aclose()` on client disconnect, which is common whenever
-            # the splitter has buffered content (partial open-tag suffix
-            # or in-block markup).
-            try:
-                async for event in graph.astream_events(
-                    graph_input,
-                    config=graph_config,
-                    version="v2",
-                ):
-                    translated = self._translate_event(event, tools_called, tool_invocations)
-                    if translated is None:
-                        continue
-                    if translated["type"] != "content":
-                        yield translated
-                        continue
-                    assistant_text_parts.append(translated["text"])
-                    for kind, payload in splitter.feed(translated["text"]):
+                    # Stream ended normally — flush any text the splitter is
+                    # still holding (only happens if the LLM cut off mid-tag).
+                    for kind, payload in splitter.flush():
                         for ev in _emit_split(kind, payload):
                             if ev["type"] == "content_block":
                                 block_events_emitted += 1
                             yield ev
-            except Exception:
-                # `except Exception` does not catch GeneratorExit (which is
-                # BaseException), so client-disconnect cleanup propagates
-                # cleanly without entering this block.
-                for kind, payload in splitter.flush():
-                    for ev in _emit_split(kind, payload):
-                        if ev["type"] == "content_block":
-                            block_events_emitted += 1
-                        yield ev
-                raise
 
-            # Stream ended normally — flush any text the splitter is still
-            # holding (only happens if the LLM cut off mid-tag).
-            for kind, payload in splitter.flush():
-                for ev in _emit_split(kind, payload):
-                    if ev["type"] == "content_block":
-                        block_events_emitted += 1
-                    yield ev
+            except Exception as exc:
+                failed = True
+                error_type = type(exc).__name__
+                # Unwrap ExceptionGroup (from anyio/asyncio TaskGroup) to
+                # the real cause — otherwise the FE shows the opaque outer
+                # "unhandled errors in a TaskGroup (N sub-exceptions)"
+                # instead of the actual auth/MCP/LLM failure underneath.
+                display_exc: BaseException = exc
+                while isinstance(display_exc, BaseExceptionGroup) and display_exc.exceptions:
+                    display_exc = display_exc.exceptions[0]
+                logger.exception(
+                    "chat_handle_message_failed",
+                    session_id=session_id,
+                    sid_present=bool(user_context.sid),
+                    error_type=type(exc).__name__,
+                    root_cause_type=type(display_exc).__name__,
+                )
+                # Record on the active span so a trace UI shows ERROR
+                # status without consulting the log. record_exception
+                # captures the type/message/stacktrace as a span event.
+                turn_span.record_exception(exc)
+                turn_span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+                # Show the exception type plus the first line of its
+                # message, capped at 500 chars. Full tracebacks stay in
+                # the structured log, but this is an
+                # internally-authenticated agent — withholding the whole
+                # error breaks debugging for no real security gain.
+                first_line = str(display_exc).splitlines()[0] if str(display_exc) else ""
+                detail = first_line[:500]
+                error_message = (
+                    f"{type(display_exc).__name__}: {detail}"
+                    if detail
+                    else type(display_exc).__name__
+                )
+                yield {"type": "error", "message": error_message}
 
-        except Exception as exc:
-            failed = True
-            error_type = type(exc).__name__
-            # Unwrap ExceptionGroup (from anyio/asyncio TaskGroup) to the real
-            # cause — otherwise the FE shows the opaque outer
-            # "unhandled errors in a TaskGroup (N sub-exceptions)" instead of
-            # the actual auth/MCP/LLM failure underneath.
-            display_exc: BaseException = exc
-            while isinstance(display_exc, BaseExceptionGroup) and display_exc.exceptions:
-                display_exc = display_exc.exceptions[0]
-            logger.exception(
-                "chat_handle_message_failed",
-                session_id=session_id,
-                sid_present=bool(user_context.sid),
-                error_type=type(exc).__name__,
-                root_cause_type=type(display_exc).__name__,
+            # Persist the final assistant message (success or error).
+            # Best-effort: if this fails it is logged inside the client and
+            # we still emit `done`.
+            assistant_content = (
+                f"[error] {error_message}" if failed else "".join(assistant_text_parts)
             )
-            # Show the exception type plus the first line of its message,
-            # capped at 500 chars. Full tracebacks stay in the structured
-            # log, but this is an internally-authenticated agent — withholding
-            # the whole error breaks debugging for no real security gain.
-            first_line = str(display_exc).splitlines()[0] if str(display_exc) else ""
-            detail = first_line[:500]
-            error_message = (
-                f"{type(display_exc).__name__}: {detail}" if detail else type(display_exc).__name__
+            tool_args_json: str | None = None
+            if tool_invocations:
+                try:
+                    tool_args_json = json.dumps(tool_invocations)
+                except (TypeError, ValueError):
+                    # Arguments weren't JSON-serialisable — drop them silently.
+                    tool_args_json = None
+            await self._history.save_message(
+                sid=user_context.sid,
+                session=session_id,
+                role="assistant",
+                content=assistant_content,
+                tool_args_json=tool_args_json,
             )
-            yield {"type": "error", "message": error_message}
 
-        # Persist the final assistant message (success or error). Best-effort:
-        # if this fails it is logged inside the client and we still emit `done`.
-        assistant_content = f"[error] {error_message}" if failed else "".join(assistant_text_parts)
-        tool_args_json: str | None = None
-        if tool_invocations:
-            try:
-                tool_args_json = json.dumps(tool_invocations)
-            except (TypeError, ValueError):
-                # Arguments weren't JSON-serialisable — drop them silently.
-                tool_args_json = None
-        await self._history.save_message(
-            sid=user_context.sid,
-            session=session_id,
-            role="assistant",
-            content=assistant_content,
-            tool_args_json=tool_args_json,
-        )
+            yield {
+                "type": "done",
+                "tools_called": tools_called,
+                "data_quality": "low" if failed else "high",
+                "timestamp": _utcnow_rfc3339_z(),
+            }
 
-        yield {
-            "type": "done",
-            "tools_called": tools_called,
-            "data_quality": "low" if failed else "high",
-            "timestamp": _utcnow_rfc3339_z(),
-        }
+            # Final summary attributes on the chat_turn span — these are
+            # what a trace UI shows as the per-turn rollup. Mirrors the
+            # turn-summary log fields below; the log is for stdout-based
+            # aggregation, the span is for trace-UI navigation. Both are
+            # kept because operators reach for whichever tool is in front
+            # of them.
+            content_chars = sum(len(p) for p in assistant_text_parts)
+            turn_span.set_attribute("tools_called_count", len(tools_called))
+            turn_span.set_attribute("content_chars", content_chars)
+            turn_span.set_attribute("block_events_emitted", block_events_emitted)
+            turn_span.set_attribute("failed", failed)
+            if error_type is not None:
+                turn_span.set_attribute("error_type", error_type)
 
-        # Single info-level audit event per turn. One log line answers
-        # "what happened on this chat call" without grepping multiple
-        # streams; failed=True funnels error_type so dashboards can
-        # bucket failures by class. Emitted after `done` so a cancelled
-        # turn (client aclose) is not summarised as completed.
-        duration_ms = (time.perf_counter() - t0) * 1000.0
-        summary: dict[str, Any] = {
-            "session_id": session_id,
-            "duration_ms": duration_ms,
-            "tools_called": tools_called,
-            "tools_called_count": len(tools_called),
-            "content_chars": sum(len(p) for p in assistant_text_parts),
-            "block_events_emitted": block_events_emitted,
-            "failed": failed,
-        }
-        if error_type is not None:
-            summary["error_type"] = error_type
-        logger.info("chat_turn_completed", **summary)
+            # Single info-level audit event per turn. One log line answers
+            # "what happened on this chat call" without grepping multiple
+            # streams; failed=True funnels error_type so dashboards can
+            # bucket failures by class. Emitted after `done` so a cancelled
+            # turn (client aclose) is not summarised as completed.
+            duration_ms = (time.perf_counter() - t0) * 1000.0
+            summary: dict[str, Any] = {
+                "session_id": session_id,
+                "duration_ms": duration_ms,
+                "tools_called": tools_called,
+                "tools_called_count": len(tools_called),
+                "content_chars": content_chars,
+                "block_events_emitted": block_events_emitted,
+                "failed": failed,
+            }
+            if error_type is not None:
+                summary["error_type"] = error_type
+            logger.info("chat_turn_completed", **summary)
 
     # ------------------------------------------------------------------ #
     # Event translation
