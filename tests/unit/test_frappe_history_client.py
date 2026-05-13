@@ -3,6 +3,7 @@ import json
 import httpx
 import pytest
 import respx
+import structlog
 
 from ai_agent.integrations.frappe_history import FrappeHistoryClient
 
@@ -232,3 +233,79 @@ async def test_write_proceeds_without_token_when_csrf_not_in_html():
     assert name == "msg-1"
     post = next(c.request for c in respx.calls if c.request.method == "POST")
     assert "X-Frappe-CSRF-Token" not in post.headers
+
+
+# ─── Failure signal: structured log + OTEL counter ───────────────────────
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_session_write_failure_emits_structured_event():
+    """A history-write failure must surface as a structured
+    `frappe_history_write_failed` event with `kind` and `status_code`
+    fields. Without these aggregable fields, a sustained Frappe-down
+    state is invisible to dashboards."""
+    _mock_csrf_ok()
+    respx.post(_SESSION_URL).mock(return_value=httpx.Response(500))
+    client = FrappeHistoryClient(base_url="http://frappe:8000")
+
+    with structlog.testing.capture_logs() as logs:
+        result = await client.create_session(sid="abc", title="t", context_json="{}")
+
+    assert result is None
+    failures = [r for r in logs if r.get("event") == "frappe_history_write_failed"]
+    assert len(failures) == 1, f"expected 1 structured failure event, got {logs!r}"
+    assert failures[0]["kind"] == "session"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_message_write_failure_emits_structured_event():
+    _mock_csrf_ok()
+    respx.post(_MESSAGE_URL).mock(return_value=httpx.Response(500))
+    client = FrappeHistoryClient(base_url="http://frappe:8000")
+
+    with structlog.testing.capture_logs() as logs:
+        result = await client.save_message(sid="abc", session="s", role="user", content="x")
+
+    assert result is None
+    failures = [r for r in logs if r.get("event") == "frappe_history_write_failed"]
+    assert len(failures) == 1
+    assert failures[0]["kind"] == "message"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_write_failures_increment_otel_counter():
+    """`agent.history.write_failures` is the metric a Prometheus/OTLP
+    collector scrapes to alert on Frappe-write outages. Without it, a
+    100%-failure rate looks identical to 0% from outside the process."""
+    from opentelemetry import metrics
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+    metrics.set_meter_provider(provider)
+
+    _mock_csrf_ok()
+    respx.post(_SESSION_URL).mock(return_value=httpx.Response(500))
+    respx.post(_MESSAGE_URL).mock(return_value=httpx.Response(500))
+    client = FrappeHistoryClient(base_url="http://frappe:8000")
+
+    await client.create_session(sid="abc", title="t", context_json="{}")
+    await client.save_message(sid="abc", session="s", role="user", content="x")
+    await client.save_message(sid="abc", session="s", role="user", content="y")
+
+    md = reader.get_metrics_data()
+    points: dict[str, int] = {}
+    for rm in md.resource_metrics:
+        for sm in rm.scope_metrics:
+            for m in sm.metrics:
+                if m.name != "agent.history.write_failures":
+                    continue
+                for dp in m.data.data_points:
+                    kind = dict(dp.attributes).get("kind", "?")
+                    points[str(kind)] = points.get(str(kind), 0) + dp.value
+    assert points.get("session") == 1, f"expected 1 session failure, got {points!r}"
+    assert points.get("message") == 2, f"expected 2 message failures, got {points!r}"
