@@ -86,15 +86,17 @@ Streaming chat endpoint. Returns `text/event-stream`.
 
 | `type`          | Payload                                                                 |
 |-----------------|-------------------------------------------------------------------------|
-| `session`       | `{ id }` — sent once, before any other event                            |
-| `status`        | `{ message }` — informational (reserved for future use)                 |
-| `tool_call`     | `{ name, arguments }` — emitted when the agent invokes a tool           |
-| `content`       | `{ text }` — prose token chunks (streams as the LLM generates)          |
-| `content_block` | `{ block }` — a complete parsed content block (chart, table, kpi, …)    |
-| `error`         | `{ message }` — fatal error; followed by `done`                         |
-| `done`          | `{ tools_called, data_quality, timestamp }` — terminal frame            |
+| `session`       | `{ id: str }` — sent once, before any other event                       |
+| `status`        | `{ message: str }` — informational (reserved for future use)            |
+| `tool_call`     | `{ name: str, arguments: dict }` — emitted when the agent invokes a tool |
+| `content`       | `{ text: str }` — prose token chunks (streams as the LLM generates)     |
+| `content_block` | `{ block: dict }` — a complete parsed content block (chart, table, …)   |
+| `error`         | `{ message: str }` — fatal error; followed by `done`                    |
+| `done`          | `{ tools_called: list[str], data_quality, timestamp: str }`             |
 
 `data_quality` is `"high"` on success, `"low"` if the turn ended in error.
+
+The wire contract is encoded as `TypedDict`s in [`src/ai_agent/transport/sse_events.py`](src/ai_agent/transport/sse_events.py) (`SessionEvent`, `StatusEvent`, `ToolCallEvent`, `ContentEvent`, `ContentBlockEvent`, `ErrorEvent`, `DoneEvent`, plus the `SSEEvent` union). A `validate_event(event: dict)` helper in the same module raises `ValueError` on any drift from the contract — `tests/unit/test_chat_service.py::test_every_emitted_event_matches_sse_contract` runs it over every event the service emits in a typical turn, so adding a new field server-side without updating the TypedDict is caught at CI time, not in a frontend bug report.
 
 ### `GET /health`
 
