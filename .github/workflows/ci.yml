@@ -197,11 +197,14 @@ jobs:
           YAML
 
       - name: Start frappe-mcp-server (background)
+        env:
+          # frappe-mcp-server reads `config.yaml` from CWD or whatever
+          # CONFIG_FILE points at; there is no `--config` flag.
+          CONFIG_FILE: ${{ github.workspace }}/mcp-config.yaml
         run: |
-          nohup ./mcp-server --config mcp-config.yaml >mcp.log 2>&1 &
+          nohup ./mcp-server >mcp.log 2>&1 &
           for _ in $(seq 1 30); do
-            if curl -sf http://localhost:8080/health >/dev/null \
-               || curl -sf http://localhost:8080/ >/dev/null; then
+            if curl -sf http://localhost:8080/health >/dev/null; then
               echo "mcp up"; exit 0
             fi
             sleep 1
