@@ -32,7 +32,11 @@ async def test_ollama_completes_a_prompt():
         llm_base_url=_BASE_URL,
         llm_model=_MODEL,
         llm_temperature=0.0,
-        llm_max_tokens=32,
+        # qwen3 family emits <think>...</think> reasoning before the answer;
+        # 32 tokens runs out mid-think and yields empty content. 512 gives
+        # the smallest variant (0.6b) enough room to finish reasoning AND
+        # produce a visible reply.
+        llm_max_tokens=512,
         llm_num_ctx=2048,
     )
     llm = create_llm(settings)
