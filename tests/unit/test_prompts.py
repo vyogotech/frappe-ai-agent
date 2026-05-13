@@ -98,9 +98,7 @@ class TestBuildSystemPrompt:
             "ff_search_doctype",
             "ff_get_hooks",
         ):
-            assert removed not in prompt, (
-                f"removed tool {removed!r} leaked into the prompt"
-            )
+            assert removed not in prompt, f"removed tool {removed!r} leaked into the prompt"
 
     def test_warns_against_pie_bar_top_level_block_types(self):
         # qwen3.5:9b regularly emitted <ai-block type="pie"> instead of
