@@ -62,6 +62,23 @@ _AI_BLOCK_OPEN = "<ai-block"
 _AI_BLOCK_CLOSE = "</ai-block>"
 
 
+# MCP tools that frappe-mcp-server keeps for backward compatibility but
+# that we don't want the LLM to invoke. The project-status family was
+# replaced by generic aggregate_documents / run_report flows; surfacing
+# them just gives the LLM a tempting wrong-path option that fails on
+# sites without the corresponding doctypes.
+_DEPRECATED_TOOLS = frozenset(
+    {
+        "get_project_status",
+        "analyze_project_timeline",
+        "get_resource_allocation",
+        "generate_project_report",
+        "resource_utilization_analysis",
+        "budget_variance_analysis",
+    }
+)
+
+
 class _ToolsUnavailable(RuntimeError):
     """Raised at the tool-load boundary when MCP can't serve tools.
 
@@ -83,10 +100,7 @@ def _tools_unavailable_message(root: BaseException) -> str:
     if isinstance(root, httpx.HTTPStatusError):
         status = root.response.status_code
         if status in (401, 403):
-            return (
-                "Tools unavailable: MCP server rejected the session "
-                "(authentication failed)."
-            )
+            return "Tools unavailable: MCP server rejected the session (authentication failed)."
         return f"Tools unavailable: MCP server returned HTTP {status}."
     if isinstance(root, httpx.TransportError):
         return "Tools unavailable: cannot reach the MCP server."
@@ -296,18 +310,36 @@ class ChatService:
                         root: BaseException = exc
                         while isinstance(root, BaseExceptionGroup) and root.exceptions:
                             root = root.exceptions[0]
+                        # sid_prefix (first 8 chars) lets the operator
+                        # cross-reference a failing MCP load against the
+                        # Frappe session log without exposing the full sid
+                        # in plaintext. A 401 here almost always means the
+                        # sid we forwarded was technically non-empty but
+                        # invalid/expired (the empty-sid case is caught
+                        # earlier by build_mcp_client_for_sid's ValueError).
+                        sid_prefix = user_context.sid[:8] if user_context.sid else None
                         logger.warning(
                             "chat_tools_load_failed",
                             session_id=session_id,
+                            sid_prefix=sid_prefix,
                             error_type=type(root).__name__,
                             error=str(root)[:200],
                         )
                         load_span.set_attribute("failed", True)
                         load_span.set_attribute("error_type", type(root).__name__)
-                        raise _ToolsUnavailable(
-                            _tools_unavailable_message(root)
-                        ) from exc
+                        raise _ToolsUnavailable(_tools_unavailable_message(root)) from exc
                     load_span.set_attribute("tool_count", len(tools))
+
+                # Drop deprecated MCP tools (project-status family, kept
+                # in frappe-mcp-server for backward compat but no longer
+                # documented). They confuse the LLM and surface as failed
+                # tool_call cards on doctypes the user doesn't even use.
+                # Filter here rather than in MCP itself so the server can
+                # keep serving older clients that still depend on them.
+                pre_count = len(tools)
+                tools = [t for t in tools if t.name not in _DEPRECATED_TOOLS]
+                if pre_count != len(tools):
+                    load_span.set_attribute("tools_filtered", pre_count - len(tools))
 
                 # Install an error handler on every tool so exceptions raised
                 # by individual tool calls become LLM-visible tool
@@ -431,15 +463,10 @@ class ChatService:
                 # ConnectError, ...) instead of the internal wrapper.
                 failed = True
                 root_cause: BaseException | None = exc.__cause__
-                while (
-                    isinstance(root_cause, BaseExceptionGroup)
-                    and root_cause.exceptions
-                ):
+                while isinstance(root_cause, BaseExceptionGroup) and root_cause.exceptions:
                     root_cause = root_cause.exceptions[0]
                 error_type = (
-                    type(root_cause).__name__
-                    if root_cause is not None
-                    else type(exc).__name__
+                    type(root_cause).__name__ if root_cause is not None else type(exc).__name__
                 )
                 turn_span.set_status(Status(StatusCode.ERROR, error_type))
                 error_message = str(exc)

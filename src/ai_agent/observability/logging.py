@@ -11,9 +11,7 @@ import structlog
 
 def _short_local_timestamp(_logger, _method, event_dict):
     now = datetime.now()
-    event_dict["timestamp"] = (
-        now.strftime("%H:%M:%S") + f".{now.microsecond // 1000:03d}"
-    )
+    event_dict["timestamp"] = now.strftime("%H:%M:%S") + f".{now.microsecond // 1000:03d}"
     return event_dict
 
 

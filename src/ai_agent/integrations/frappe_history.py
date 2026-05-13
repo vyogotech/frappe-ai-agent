@@ -194,9 +194,29 @@ class FrappeHistoryClient:
                 headers={"Cookie": f"sid={sid}"},
             )
             response.raise_for_status()
+            # Frappe responds 200 + 302→/login when the sid is missing /
+            # expired / belongs to Guest, and httpx silently follows the
+            # redirect. The login page never contains `csrf_token = ...`,
+            # so without this check we just emit a generic "not found"
+            # warning that hides the real cause. Surface it directly so an
+            # operator immediately sees "the sid you forwarded is invalid".
+            if "/login" in response.url.path:
+                logger.warning(
+                    "frappe_history_csrf_fetch_unauthenticated",
+                    final_url=str(response.url),
+                    hint="sid invalid/expired; subsequent writes will 403",
+                )
+                return None
             match = _CSRF_PATTERN.search(response.text)
             if match is None:
-                logger.warning("frappe csrf token not found in /app response")
+                # Should be rare now that the redirect case is caught above
+                # — surface enough detail to diagnose (response size + a
+                # short slice) without dumping the whole 400KB desk HTML.
+                logger.warning(
+                    "frappe csrf token not found in /app response",
+                    response_size=len(response.text),
+                    response_head=response.text[:200],
+                )
                 return None
             return match.group(1)
         except Exception as exc:
@@ -257,6 +277,27 @@ class FrappeHistoryClient:
                     if fresh:
                         headers[_CSRF_HEADER] = fresh
                         response = await client.post(url, json=payload, headers=headers)
+
+                # 409 on an explicit-name session POST is the documented
+                # idempotent path: ensure_session always re-posts the same
+                # name on every continued turn, and "already exists" means
+                # the row is already there from a prior turn. Surface this
+                # as info, not warning, and short-circuit to the supplied
+                # name so the caller doesn't fall through to the generic
+                # write-failed branch (which fires the alerting counter).
+                #
+                # Limited to kind=="session" + payload carrying a "name":
+                # AI Chat Message creates are auto-named by Frappe, so a
+                # 409 there is a real bug worth shouting about.
+                if response.status_code == 409 and kind == "session" and "name" in payload:
+                    logger.info(
+                        "frappe_history_session_already_exists",
+                        kind=kind,
+                        name=payload["name"],
+                    )
+                    span.set_attribute("status_code", response.status_code)
+                    span.set_attribute("idempotent", True)
+                    return payload["name"]
 
                 response.raise_for_status()
                 span.set_attribute("status_code", response.status_code)

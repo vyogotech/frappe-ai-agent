@@ -419,9 +419,7 @@ async def test_tool_load_auth_rejection_yields_authentication_message(status):
     mock_client = MagicMock()
     mock_client.get_tools = AsyncMock(side_effect=_http_status_error(status))
 
-    with patch(
-        "ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client
-    ):
+    with patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client):
         events = await _drain(
             service.handle_message(
                 message="hi",
@@ -450,9 +448,7 @@ async def test_tool_load_transport_error_yields_unreachable_message():
         side_effect=httpx.ConnectError("All connection attempts failed")
     )
 
-    with patch(
-        "ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client
-    ):
+    with patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client):
         events = await _drain(
             service.handle_message(
                 message="hi",
@@ -480,9 +476,7 @@ async def test_tool_load_unknown_http_status_yields_status_code_in_message():
     mock_client = MagicMock()
     mock_client.get_tools = AsyncMock(side_effect=_http_status_error(500))
 
-    with patch(
-        "ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client
-    ):
+    with patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client):
         events = await _drain(
             service.handle_message(
                 message="hi",

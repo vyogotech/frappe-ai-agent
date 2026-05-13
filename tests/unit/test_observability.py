@@ -3,8 +3,6 @@ import logging as stdlib_logging
 import re
 from unittest.mock import patch
 
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-
 import structlog
 
 from ai_agent.observability.logging import (
@@ -14,6 +12,10 @@ from ai_agent.observability.logging import (
     setup_logging,
 )
 from ai_agent.observability.tracing import create_tracer_provider
+
+# Strips ANSI color escapes from captured stdout so assertions don't have to
+# fight terminal formatting. Defined after imports to satisfy E402.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 class TestLogging:
@@ -38,15 +40,11 @@ class TestConsoleProcessors:
         assert ts[9:].isdigit()
 
     def test_strip_ai_agent_logger_prefix_strips_when_present(self):
-        result = _strip_ai_agent_logger_prefix(
-            None, "info", {"logger": "ai_agent.services.chat"}
-        )
+        result = _strip_ai_agent_logger_prefix(None, "info", {"logger": "ai_agent.services.chat"})
         assert result["logger"] == "services.chat"
 
     def test_strip_ai_agent_logger_prefix_leaves_others_alone(self):
-        result = _strip_ai_agent_logger_prefix(
-            None, "info", {"logger": "uvicorn.error"}
-        )
+        result = _strip_ai_agent_logger_prefix(None, "info", {"logger": "uvicorn.error"})
         assert result["logger"] == "uvicorn.error"
 
     def test_strip_ai_agent_logger_prefix_no_logger_key(self):
@@ -54,9 +52,7 @@ class TestConsoleProcessors:
         assert result == {"event": "x"}
 
     def test_drop_request_id_removes_key(self):
-        result = _drop_request_id(
-            None, "info", {"event": "x", "request_id": "abc-123"}
-        )
+        result = _drop_request_id(None, "info", {"event": "x", "request_id": "abc-123"})
         assert "request_id" not in result
         assert result["event"] == "x"
 
