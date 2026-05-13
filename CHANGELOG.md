@@ -43,6 +43,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   and `status_code` fields. The CSRF fetch and retry logs gained event names
   too (`frappe_history_csrf_fetch_failed`,
   `frappe_history_csrf_token_rejected_refreshing`).
+- **Pluggable LangGraph checkpointer.** New env var `AI_AGENT_AGENT_CHECKPOINTER`:
+  - `memory` (default) — `InMemorySaver`, today's behaviour. Per-process.
+  - `sqlite:<path>` — `AsyncSqliteSaver` against the given file. Shared across
+    workers via the file, persists across restarts.
+  - `sqlite::memory:` — in-process SQLite, useful for tests.
+  Field validator rejects any other value at startup (catches `memry` /
+  `Postgres://…` typos that would otherwise have silently fallen back to
+  in-memory). New `checkpointer_context(setting)` async context manager in
+  `agent/graph.py` opens and closes the AsyncSqliteSaver via the lifespan
+  so the connection releases cleanly on shutdown (langgraph's docs note
+  the process can hang otherwise).
+- **Multi-worker safety warning.** A loud structured
+  `checkpointer_memory_multi_worker_unsafe` warning fires at startup when
+  `workers > 1` AND `agent_checkpointer == "memory"`. Without the warning,
+  conversation continuity broke silently in a 4-worker default deploy
+  because uvicorn does not pin a sid to a worker — the LLM "forgot" what
+  was said even though the Frappe history rows preserved it. The warning
+  carries remediation advice (set the sqlite URL or drop workers to 1).
 - MIT `LICENSE` file at repo root (matches `pyproject.toml` declaration).
 - `AI_AGENT_AGENT_RECURSION_LIMIT` env var — was a hardcoded `50` in `chat.py`.
 - `AI_AGENT_AGENT_RATE_LIMIT` env var + slowapi-based per-sid rate limit on `POST /api/v1/chat` (default `30/minute`).
@@ -51,6 +69,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - New CI job `integration` runs on every push to `main`, spinning up MariaDB + Redis services, a real Frappe v15 bench with the `frappe_ai` app installed, the `frappe-mcp-server` Go binary built from source, and a containerised Ollama (`qwen3:0.6b`). Three integration tests exercise the LLM, MCP, and Frappe-history boundaries end-to-end via the Administrator sid.
 
 ### Changed
+- **`FrappeHistoryClient` reuses one `httpx.AsyncClient` per instance** instead
+  of opening a fresh one for every CSRF fetch / write. Previously a chat turn
+  paid 3-4 TCP connection setups (plus TLS handshakes when behind HTTPS); now
+  the writes share a connection pool. New idempotent `aclose()` method is
+  invoked by the FastAPI lifespan teardown so the pool releases sockets cleanly
+  on shutdown.
 - Routers and services are now wired at `create_app` time instead of inside the `lifespan` context manager — `app.routes` is populated before first request.
 - Parser chart-alias storage simplified from a degenerate dict to a `frozenset`.
 - CI `test` job now includes `tests/features/` (BDD smoke scenarios) alongside `tests/unit/`.

@@ -29,7 +29,11 @@ class Settings(BaseSettings):
     # Server
     host: str = "0.0.0.0"
     port: int = 8484
-    workers: int = 4
+    # Default to 1 so the checkpointer-vs-workers warning is rare and
+    # intentional (operators who pick multi-worker deliberately set this).
+    # The Dockerfile honours `${AI_AGENT_WORKERS:-1}`, so this default
+    # matches actual container behaviour.
+    workers: int = 1
     cors_origins: list[str] = ["http://localhost:8000"]
 
     @field_validator("cors_origins")
@@ -72,6 +76,28 @@ class Settings(BaseSettings):
     # Why: per-sid rate limit on POST /api/v1/chat. slowapi syntax;
     # "<count>/<period>" — minute / second / hour / day.
     agent_rate_limit: str = "30/minute"
+    # LangGraph checkpointer backend. Determines where per-conversation
+    # state (thread history that drives multi-turn continuity) lives:
+    #   "memory" — InMemorySaver. Process-local; lost on restart. The
+    #     default, but NOT safe with workers > 1 because uvicorn does
+    #     not pin a sid to a worker — a second turn has a 1/workers
+    #     chance of seeing the prior checkpoint.
+    #   "sqlite:/abs/path/to/checkpoints.db" — AsyncSqliteSaver. Shared
+    #     across processes via the file. Production-acceptable for
+    #     low-concurrency deployments; langgraph's docs caution against
+    #     it under heavy write load.
+    #   "sqlite::memory:" — in-process SQLite. Same process-local
+    #     limitation as memory; useful for tests.
+    agent_checkpointer: str = "memory"
+
+    @field_validator("agent_checkpointer")
+    @classmethod
+    def _validate_checkpointer(cls, v: str) -> str:
+        # Catches "memry" / "Postgres://..." typos that would have
+        # silently fallen back to in-memory at startup.
+        if v == "memory" or v.startswith("sqlite:"):
+            return v
+        raise ValueError(f"agent_checkpointer must be 'memory' or 'sqlite:<path>', got {v!r}")
 
     # MCP: Streamable HTTP endpoint. frappe-mcp-server mounts /mcp on its
     # main HTTP port (default 8080), NOT the port+1 MCP-protocol-only server.
