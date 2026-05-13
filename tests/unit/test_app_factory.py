@@ -62,3 +62,68 @@ class TestCreateApp:
         rest_paths = {getattr(r, "path", None) for r in app.routes}
         assert "/health" in rest_paths
         assert "/config" in rest_paths
+
+    def test_multi_worker_with_memory_checkpointer_warns_at_startup(self):
+        """Ship-blocker guard: workers>1 + InMemorySaver = silent
+        conversation-loss because uvicorn does not pin a sid to a
+        worker. The startup must emit a loud structured warning so
+        operators get the signal in their log aggregator instead of
+        debugging "the AI keeps forgetting" tickets.
+
+        structlog.testing.capture_logs replaces the processor chain;
+        we reset_defaults first so a prior test's setup_logging() call
+        doesn't leave the structlog config cached against this one
+        (cache_logger_on_first_use=True is set by setup_logging)."""
+        import structlog
+
+        structlog.reset_defaults()
+        settings = Settings(
+            _env_file=None,  # pyright: ignore[reportCallIssue]
+            workers=4,
+            agent_checkpointer="memory",
+        )
+        with structlog.testing.capture_logs() as logs:
+            with TestClient(create_app(settings)) as client:
+                resp = client.get("/health")
+                assert resp.status_code == 200
+
+        warnings = [r for r in logs if r.get("event") == "checkpointer_memory_multi_worker_unsafe"]
+        assert len(warnings) == 1, f"expected one multi-worker safety warning, got {warnings!r}"
+        assert warnings[0]["log_level"] == "warning"
+        assert warnings[0]["workers"] == 4
+
+    def test_single_worker_with_memory_checkpointer_does_not_warn(self):
+        """The warning should fire only when the combo is actually unsafe."""
+        import structlog
+
+        structlog.reset_defaults()
+        settings = Settings(
+            _env_file=None,  # pyright: ignore[reportCallIssue]
+            workers=1,
+            agent_checkpointer="memory",
+        )
+        with structlog.testing.capture_logs() as logs:
+            with TestClient(create_app(settings)) as client:
+                client.get("/health")
+
+        warnings = [r for r in logs if r.get("event") == "checkpointer_memory_multi_worker_unsafe"]
+        assert warnings == []
+
+    def test_sqlite_checkpointer_is_active_after_startup(self, tmp_path):
+        """When agent_checkpointer=sqlite:..., the lifespan must replace
+        the factory-time InMemorySaver with the real AsyncSqliteSaver
+        so per-turn graph runs persist via the file."""
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+        db_path = tmp_path / "ckpt.db"
+        settings = Settings(
+            _env_file=None,  # pyright: ignore[reportCallIssue]
+            agent_checkpointer=f"sqlite:{db_path}",
+        )
+        app = create_app(settings)
+        # Before lifespan startup the factory-time InMemorySaver is in
+        # place — the swap happens at startup. TestClient.__enter__ runs
+        # the lifespan, so check the saver inside the with block.
+        with TestClient(app) as client:
+            client.get("/health")
+            assert isinstance(app.state.chat_service._checkpointer, AsyncSqliteSaver)
