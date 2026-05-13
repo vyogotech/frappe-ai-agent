@@ -14,14 +14,26 @@ error we invalidate the cache so the next call re-fetches.
 
 from __future__ import annotations
 
-import logging
 import re
 from typing import Any
 from uuid import uuid4
 
 import httpx
+import structlog
+from opentelemetry import metrics, trace
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
+_tracer = trace.get_tracer(__name__)
+
+# Counter for sustained-failure alerting. Without this, a Frappe-write
+# outage looks identical to a healthy system from outside the process —
+# the WARN logs are per-call, not aggregable. Attribute `kind` lets a
+# dashboard split "all sessions failing" from "all messages failing".
+_meter = metrics.get_meter(__name__)
+_history_write_failures = _meter.create_counter(
+    name="agent.history.write_failures",
+    description="Count of failed AI Chat Session/Message writes to Frappe",
+)
 
 _SESSION_URL_PATH = "/api/resource/AI Chat Session"
 _MESSAGE_URL_PATH = "/api/resource/AI Chat Message"
@@ -145,7 +157,11 @@ class FrappeHistoryClient:
                     return None
                 return match.group(1)
         except Exception as exc:
-            logger.warning("frappe csrf fetch failed: %s", exc)
+            logger.warning(
+                "frappe_history_csrf_fetch_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             return None
 
     async def _csrf_token_for(self, sid: str) -> str | None:
@@ -167,30 +183,56 @@ class FrappeHistoryClient:
         sid: str,
         kind: str,
     ) -> str | None:
-        csrf_token = await self._csrf_token_for(sid)
-        headers: dict[str, str] = {"Cookie": f"sid={sid}"}
-        if csrf_token:
-            headers[_CSRF_HEADER] = csrf_token
+        # `agent.history.write` nests under the active agent.chat_turn span
+        # when this is called from ChatService, giving the trace UI a named
+        # row for each history write. The kind attribute lets you see at a
+        # glance "where did 300ms go" — session create vs message save vs
+        # ensure. get_tracer is a no-op when OTEL is disabled.
+        with _tracer.start_as_current_span("agent.history.write") as span:
+            span.set_attribute("kind", kind)
+            csrf_token = await self._csrf_token_for(sid)
+            headers: dict[str, str] = {"Cookie": f"sid={sid}"}
+            if csrf_token:
+                headers[_CSRF_HEADER] = csrf_token
 
-        try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                response = await client.post(url, json=payload, headers=headers)
+            try:
+                async with httpx.AsyncClient(timeout=self._timeout) as client:
+                    response = await client.post(url, json=payload, headers=headers)
 
-            if response.status_code == 400 and _looks_like_csrf_error(response):
-                # Token probably rotated. Clear cache, refetch, try once.
-                logger.info("frappe csrf token rejected, refreshing once")
-                self._invalidate_csrf(sid)
-                fresh = await self._csrf_token_for(sid)
-                if fresh:
-                    headers[_CSRF_HEADER] = fresh
-                    async with httpx.AsyncClient(timeout=self._timeout) as client:
-                        response = await client.post(url, json=payload, headers=headers)
+                if response.status_code == 400 and _looks_like_csrf_error(response):
+                    # Token probably rotated. Clear cache, refetch, try once.
+                    logger.info("frappe_history_csrf_token_rejected_refreshing", kind=kind)
+                    self._invalidate_csrf(sid)
+                    fresh = await self._csrf_token_for(sid)
+                    if fresh:
+                        headers[_CSRF_HEADER] = fresh
+                        async with httpx.AsyncClient(timeout=self._timeout) as client:
+                            response = await client.post(url, json=payload, headers=headers)
 
-            response.raise_for_status()
-            return response.json()["data"]["name"]
-        except Exception as exc:
-            logger.warning("frappe history write failed (%s): %s", kind, exc)
-            return None
+                response.raise_for_status()
+                span.set_attribute("status_code", response.status_code)
+                return response.json()["data"]["name"]
+            except Exception as exc:
+                # Structured event + counter so a sustained Frappe-write
+                # outage is both grep-able in logs and scrape-able as a
+                # metric. status_code is recorded when the failure was an
+                # HTTP response (httpx HTTPStatusError carries
+                # .response.status_code); for transport errors (timeout,
+                # DNS, refused) it is None.
+                status_code = getattr(getattr(exc, "response", None), "status_code", None)
+                logger.warning(
+                    "frappe_history_write_failed",
+                    kind=kind,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    status_code=status_code,
+                )
+                _history_write_failures.add(1, {"kind": kind})
+                span.set_attribute("failed", True)
+                span.set_attribute("error_type", type(exc).__name__)
+                if status_code is not None:
+                    span.set_attribute("status_code", status_code)
+                return None
 
 
 def _looks_like_csrf_error(response: httpx.Response) -> bool:
