@@ -386,6 +386,29 @@ mentioning `GraphRecursionError`.
    an httpx timeout on the LLM client via the provider's options
    if your provider supports it.
 
+### Known limitation — cancelled turns leave no `chat_turn_completed` log
+
+When a client disconnects mid-stream, Starlette calls `aclose()` on
+the async generator, raising `GeneratorExit` at the current `yield`.
+`GeneratorExit` is `BaseException`, not `Exception`, so the existing
+`except Exception` in `ChatService.handle_message` does not catch
+it; control unwinds through the `agent.chat_turn` span (which ends
+cleanly with no ERROR status — correct, cancellation isn't an
+error). The trailing `logger.info("chat_turn_completed", ...)` line
+sits after `yield "done"`, so on a cancelled turn it never fires.
+
+**Detection today:** a `request_id` value that appears in the early
+request lifecycle (the `RequestIDMiddleware` bind, or the initial
+`session` SSE event) but does NOT appear in a subsequent
+`chat_turn_completed` line is a cancelled turn.
+
+A future change may emit a dedicated `chat_turn_cancelled` event in
+the `GeneratorExit` path. It is intentionally not implemented today
+to avoid the yield-in-cancellation-path `RuntimeError` that the
+explicit non-`finally` design in `src/ai_agent/services/chat.py`
+(see comments around the inner `try/except Exception:` block in
+`handle_message`) was added to avoid.
+
 ## Docker
 
 ```bash
