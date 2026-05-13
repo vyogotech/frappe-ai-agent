@@ -151,6 +151,12 @@ jobs:
           bench --site test_site.local install-app frappe_ai
           # Allow the host header used by curl from this job.
           bench --site test_site.local set-config host_name "http://localhost:8000"
+          # bench serve doesn't build/serve desk assets, so GET /app 500s and
+          # FrappeHistoryClient can't scrape a CSRF token. The site is throw-
+          # away CI, so disable CSRF entirely — writes go through without a
+          # token. This mirrors what real production agents would do behind
+          # a sid-trusted boundary anyway.
+          bench --site test_site.local set-config ignore_csrf 1
 
       - name: Start Frappe (background)
         working-directory: frappe-bench
