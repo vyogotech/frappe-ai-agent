@@ -252,6 +252,115 @@ uv run pytest --cov=ai_agent           # coverage
 - **Request correlation** — every response carries an `X-Request-ID` header; clients can pin a value by sending the same header.
 - **OpenTelemetry** — set `AI_AGENT_OTEL_ENDPOINT` to an OTLP gRPC collector to enable FastAPI instrumentation and span export. Empty endpoint = tracing off (no exporter wired in).
 
+## Runbook
+
+Practical "got paged at 3am" diagnosis paths. Each scenario lists the
+visible symptom, the signals to consult, and the remediation. Assumes
+the deployment has `AI_AGENT_LOG_FORMAT=json` (default) and the OTEL
+spans / counters from the Operability branch are wired.
+
+### Chat requests return 500 / clients see `error` events
+
+**Symptoms:** FE shows a red error bubble; SSE stream carries one
+`error` event followed by `done` with `data_quality: "low"`.
+
+1. Grep the agent log for `chat_handle_message_failed` — the
+   `root_cause_type` field names the first concrete exception
+   underneath any TaskGroup wrapper.
+2. Inspect the `agent.chat_turn` span (status: ERROR) in your trace UI.
+   `record_exception` on the span carries the type / message / stack;
+   the child spans (`agent.load_tools`, `agent.graph_run`) show which
+   phase blew up.
+3. Common causes:
+   - MCP unreachable → `agent.load_tools` span error;
+     `RuntimeError: MCP tools/list timed out after 20s`
+   - LLM unreachable → `agent.graph_run` span error; httpx connect /
+     timeout under it
+   - Frappe Login expired → tool observations return
+     `Access denied: permission error — …` (those are not errors,
+     they're tool results; the LLM should explain them in the reply)
+
+### MCP `/health?detail=true` reports MCP not OK
+
+**Symptoms:** `/health?detail=true` returns `{"mcp": {"ok": false, ...}}`.
+
+1. The probe hits `<mcp_server_url's host>/health` — it's a liveness
+   probe only; it does not call `tools/list`. A frappe-mcp-server up
+   on its HTTP port but failing tools/list can still report healthy.
+2. Verify directly: `curl -s http://<mcp-host>:<port>/health`.
+3. If health is OK but chats fail with MCP errors, the issue is
+   tools/list — exercise via `curl` or the `agent.load_tools` span.
+
+### Frappe history writes are silently dropped
+
+**Symptoms:** Conversations work fine but AI Chat Session / AI Chat
+Message rows stop appearing in Frappe.
+
+1. Grep `frappe_history_write_failed` in agent logs — `kind`
+   (session/message), `error_type`, and `status_code` (when HTTP)
+   identify what's failing.
+2. If you scrape OTEL metrics, `agent.history.write_failures`
+   counter (labels: `kind`) is non-zero. An alert
+   `rate(agent_history_write_failures_total[5m]) > 0` is the right
+   shape for this.
+3. Common causes: Frappe down (transport errors), session cookie
+   expired (401), CSRF token wedged (400 with `CSRFTokenError` —
+   the client auto-refreshes once, but a sustained block means the
+   `/app` page is unreachable, see the
+   `frappe_history_csrf_fetch_failed` log).
+
+### Multi-worker conversation amnesia ("AI keeps forgetting")
+
+**Symptoms:** First turn in a session works; second turn behaves as
+if the prior context never happened, even though Frappe rows show
+both turns.
+
+1. Look for a startup `checkpointer_memory_multi_worker_unsafe`
+   warning. It fires when `AI_AGENT_WORKERS > 1` and
+   `AI_AGENT_AGENT_CHECKPOINTER=memory`. Each worker has its own
+   in-memory checkpointer, so a follow-up turn that lands on a
+   different worker sees a fresh thread state.
+2. Switch to a shared backend (see
+   [Multi-worker deployments](#multi-worker-deployments)) or set
+   `AI_AGENT_WORKERS=1` if a single worker is enough for your load.
+
+### Rate-limit `429`s
+
+**Symptoms:** Specific user gets `429 Too Many Requests` from
+`POST /api/v1/chat`.
+
+1. The default limit is `30/minute` per `sid`. If that's wrong for
+   your deployment, tune `AI_AGENT_AGENT_RATE_LIMIT` (slowapi
+   syntax: `<count>/<period>`).
+2. Anonymous callers (missing/empty `sid` cookie) get `401` and
+   **do not** consume a token from the IP-keyed bucket, so a spray
+   from one IP cannot lock out shared-NAT users.
+
+### Agent loops past the recursion limit
+
+**Symptoms:** `chat_handle_message_failed` log with `root_cause_type`
+mentioning `GraphRecursionError`.
+
+1. The agent is stuck exploring schemas without converging — common
+   with small local models on complex multi-doctype queries.
+2. Short-term: bump `AI_AGENT_AGENT_RECURSION_LIMIT` (default 50;
+   75-100 is reasonable for a small model on a heavy query).
+3. Longer-term: a larger model (qwen2.5:14b+) usually fixes this.
+
+### SSE stream hangs / never closes
+
+**Symptoms:** Client connection open indefinitely; no `done` frame.
+
+1. `chat_turn_completed` log absent for that request means the
+   generator never reached `done`. Check `X-Request-ID` and trace
+   the matching `agent.chat_turn` span — if it's still open, the
+   request is genuinely live.
+2. The 20s MCP `tools/list` timeout is the only hard internal
+   bound — beyond that, the LLM is presumed to be streaming.
+3. If the LLM provider hangs, the request will hang too. Configure
+   an httpx timeout on the LLM client via the provider's options
+   if your provider supports it.
+
 ## Docker
 
 ```bash
