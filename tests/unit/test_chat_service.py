@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 import structlog
 from langchain_core.messages import AIMessageChunk
@@ -394,6 +395,106 @@ async def test_tool_load_warning_unwraps_exception_group_to_root_cause():
     assert len(warns) == 1
     assert warns[0]["error_type"] == "RuntimeError"
     assert warns[0]["error"] == "Session terminated"
+
+
+def _http_status_error(status: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "http://localhost:8000/mcp")
+    response = httpx.Response(status, request=request)
+    return httpx.HTTPStatusError(
+        f"Client error '{status}' for url '{request.url}'",
+        request=request,
+        response=response,
+    )
+
+
+@pytest.mark.parametrize("status", [401, 403])
+@pytest.mark.asyncio
+async def test_tool_load_auth_rejection_yields_authentication_message(status):
+    """401/403 from the MCP server is reported as an auth-failure, not
+    'cannot reach' — otherwise an operator chasing a stale sid wastes
+    time looking at networking."""
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(side_effect=_http_status_error(status))
+
+    with patch(
+        "ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client
+    ):
+        events = await _drain(
+            service.handle_message(
+                message="hi",
+                session_id="s-auth",
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    error_events = [e for e in events if e["type"] == "error"]
+    assert len(error_events) == 1
+    msg = error_events[0]["message"]
+    assert "authentication failed" in msg
+    assert "cannot reach" not in msg
+
+
+@pytest.mark.asyncio
+async def test_tool_load_transport_error_yields_unreachable_message():
+    """ConnectError / DNS failure / refused: report as unreachable so
+    the operator knows to check whether the MCP process is up."""
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(
+        side_effect=httpx.ConnectError("All connection attempts failed")
+    )
+
+    with patch(
+        "ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client
+    ):
+        events = await _drain(
+            service.handle_message(
+                message="hi",
+                session_id="s-conn",
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    error_events = [e for e in events if e["type"] == "error"]
+    assert len(error_events) == 1
+    msg = error_events[0]["message"]
+    assert "cannot reach" in msg
+    assert "authentication" not in msg
+
+
+@pytest.mark.asyncio
+async def test_tool_load_unknown_http_status_yields_status_code_in_message():
+    """An unexpected HTTP status (e.g. 500) gets a status-coded message
+    so the operator can tell 'server is broken' from 'server rejected
+    auth' without opening the log."""
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(side_effect=_http_status_error(500))
+
+    with patch(
+        "ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client
+    ):
+        events = await _drain(
+            service.handle_message(
+                message="hi",
+                session_id="s-500",
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    error_events = [e for e in events if e["type"] == "error"]
+    assert len(error_events) == 1
+    assert "HTTP 500" in error_events[0]["message"]
 
 
 @pytest.mark.asyncio

@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
+import httpx
 import structlog
 from langchain_core.messages import AIMessageChunk, HumanMessage
 from langchain_core.runnables import RunnableConfig
@@ -69,6 +70,27 @@ class _ToolsUnavailable(RuntimeError):
     an exception traceback — MCP being unreachable is a known
     operational state, not a programming error.
     """
+
+
+def _tools_unavailable_message(root: BaseException) -> str:
+    """Map a tool-load root cause to a user-facing SSE error string.
+
+    Three buckets — the structured warning log carries the exact
+    type + message for operators; this string is what reaches the FE
+    bubble. Picked so the user can tell "the server is down" from
+    "my session expired" without reading exception classes.
+    """
+    if isinstance(root, httpx.HTTPStatusError):
+        status = root.response.status_code
+        if status in (401, 403):
+            return (
+                "Tools unavailable: MCP server rejected the session "
+                "(authentication failed)."
+            )
+        return f"Tools unavailable: MCP server returned HTTP {status}."
+    if isinstance(root, httpx.TransportError):
+        return "Tools unavailable: cannot reach the MCP server."
+    return "Tools unavailable."
 
 
 class _BlockStreamSplitter:
@@ -283,7 +305,7 @@ class ChatService:
                         load_span.set_attribute("failed", True)
                         load_span.set_attribute("error_type", type(root).__name__)
                         raise _ToolsUnavailable(
-                            "Tools unavailable: cannot reach the MCP server."
+                            _tools_unavailable_message(root)
                         ) from exc
                     load_span.set_attribute("tool_count", len(tools))
 
