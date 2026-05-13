@@ -55,3 +55,25 @@ class TestSettings:
         monkeypatch.setenv("AI_AGENT_AGENT_RATE_LIMIT", "10/second")
         settings = Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
         assert settings.agent_rate_limit == "10/second"
+
+    def test_agent_checkpointer_defaults_to_memory(self):
+        settings = Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
+        assert settings.agent_checkpointer == "memory"
+
+    def test_agent_checkpointer_accepts_sqlite_path(self):
+        settings = Settings(
+            _env_file=None,  # pyright: ignore[reportCallIssue]
+            agent_checkpointer="sqlite:/tmp/test.db",
+        )
+        assert settings.agent_checkpointer == "sqlite:/tmp/test.db"
+
+    def test_agent_checkpointer_rejects_unknown_backend(self):
+        # Catches the "I typed `memry` and prod silently fell back to
+        # in-memory" footgun. Memory and sqlite are the only supported
+        # backends; anything else must fail at startup.
+        with pytest.raises(ValidationError) as excinfo:
+            Settings(
+                _env_file=None,  # pyright: ignore[reportCallIssue]
+                agent_checkpointer="redis://localhost:6379",
+            )
+        assert "agent_checkpointer" in str(excinfo.value).lower()

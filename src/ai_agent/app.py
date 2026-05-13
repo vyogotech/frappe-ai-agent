@@ -12,7 +12,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from ai_agent.agent.graph import build_checkpointer
+from ai_agent.agent.graph import build_checkpointer, checkpointer_context
 from ai_agent.agent.prompts import build_system_prompt
 from ai_agent.config import Settings
 from ai_agent.integrations.llm import create_llm
@@ -51,6 +51,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if settings is None:
         settings = Settings()
 
+    # Ship-blocker guard: in-memory checkpointer + multi-worker = silent
+    # conversation loss. uvicorn does not pin a sid to a worker, so a
+    # follow-up turn has a 1/workers chance of seeing the prior checkpoint.
+    # Emit BEFORE setup_logging so the warning is visible to any structlog
+    # processor active when create_app is called (e.g. capture_logs in
+    # tests). Get a fresh logger here (not the module-level one) so a
+    # test that wraps create_app in capture_logs gets the current
+    # processor chain instead of a cached-at-import-time chain.
+    if settings.workers > 1 and settings.agent_checkpointer == "memory":
+        structlog.get_logger().warning(
+            "checkpointer_memory_multi_worker_unsafe",
+            workers=settings.workers,
+            advice=(
+                "Set AI_AGENT_AGENT_CHECKPOINTER=sqlite:/path/to/ckpt.db for a "
+                "shared backend, or set AI_AGENT_WORKERS=1 if persistence across "
+                "workers is not required."
+            ),
+        )
+
     setup_logging(level=settings.log_level, log_format=settings.log_format)
 
     # Services + routers are bound at factory time, not during startup.
@@ -83,8 +102,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             FastAPIInstrumentor.instrument_app(app)
 
-        logger.info("started")
-        yield
+        # Activate the configured checkpointer for the lifetime of the
+        # app. For "memory" this is a no-op replacement (the same kind
+        # of InMemorySaver as the factory-time default). For
+        # "sqlite:<path>" the AsyncSqliteSaver is opened here and
+        # closed on shutdown — without the close, langgraph's docs note
+        # the process can hang on exit. ChatService reads the
+        # checkpointer per request, so swapping the attribute in place
+        # is safe.
+        async with checkpointer_context(settings.agent_checkpointer) as saver:
+            chat_service._checkpointer = saver
+            logger.info("started", checkpointer=settings.agent_checkpointer)
+            yield
 
         logger.info("stopped")
 
