@@ -36,15 +36,196 @@ jobs:
         with:
           files: coverage.xml
 
-  # Manual dispatch only — integration tests need real Ollama/MCP/Frappe.
+  # Real end-to-end: live Ollama + frappe-mcp-server + Frappe with the
+  # frappe_ai app installed. Heavy (~10 min) but gates merges on the
+  # actual integration boundaries the agent depends on.
   integration:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: [lint, typecheck]
+    env:
+      # Versions / model pinned here so a single edit moves the whole job.
+      FRAPPE_BRANCH: version-15
+      FRAPPE_PY: "3.12"
+      OLLAMA_MODEL: qwen3:0.6b
+      MCP_REPO: vyogotech/frappe-mcp-server
+      FRAPPE_AI_REPO: vyogotech/frappe_ai
+    services:
+      mariadb:
+        image: mariadb:10.6
+        env:
+          MARIADB_ROOT_PASSWORD: travis
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis-cache:
+        image: redis:alpine
+        ports:
+          - 13000:6379
+      redis-queue:
+        image: redis:alpine
+        ports:
+          - 11000:6379
     steps:
       - uses: actions/checkout@v6
+
+      - name: Set up Python ${{ env.FRAPPE_PY }} (Frappe + agent share one interp)
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.FRAPPE_PY }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
       - uses: astral-sh/setup-uv@v8.1.0
-      - run: uv sync --all-extras
-      - run: uv run pytest -m integration -v
+
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mariadb-client \
+            libmariadb-dev \
+            wkhtmltopdf \
+            xvfb \
+            libfontconfig
+
+      - name: Configure MariaDB for Frappe (utf8mb4 + remote root)
+        run: |
+          mysql -h 127.0.0.1 -P 3306 -u root -ptravis -e "
+            SET GLOBAL character_set_server = 'utf8mb4';
+            SET GLOBAL collation_server = 'utf8mb4_unicode_ci';
+            CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY 'travis';
+            GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;
+            FLUSH PRIVILEGES;"
+
+      - name: Start Ollama
+        run: |
+          docker run -d --name ollama -p 11434:11434 ollama/ollama:latest
+          # Daemon binds the port before the model index is ready; poll until /api/tags answers.
+          for _ in $(seq 1 30); do
+            if curl -sf http://localhost:11434/api/tags >/dev/null; then break; fi
+            sleep 1
+          done
+          docker exec ollama ollama pull "$OLLAMA_MODEL"
+
+      - name: Install frappe-bench
+        run: pip install frappe-bench
+
+      - name: bench init (Frappe ${{ env.FRAPPE_BRANCH }})
+        run: |
+          bench init \
+            --skip-redis-config-generation \
+            --skip-assets \
+            --python "$(which python3)" \
+            --frappe-branch "$FRAPPE_BRANCH" \
+            frappe-bench
+
+      - name: Point bench at the CI Redis instances
+        working-directory: frappe-bench
+        run: |
+          bench set-config -g redis_cache "redis://localhost:13000"
+          bench set-config -g redis_queue "redis://localhost:11000"
+          bench set-config -g redis_socketio "redis://localhost:13000"
+
+      - name: Install frappe_ai (provides AI Chat Session / AI Chat Message DocTypes)
+        working-directory: frappe-bench
+        run: |
+          bench get-app --skip-assets "https://github.com/${FRAPPE_AI_REPO}.git"
+
+      - name: Create test site + install frappe_ai
+        working-directory: frappe-bench
+        run: |
+          bench new-site test_site.local \
+            --mariadb-root-password travis \
+            --admin-password admin \
+            --no-mariadb-socket
+          bench --site test_site.local install-app frappe_ai
+          # Allow the host header used by curl from this job.
+          bench --site test_site.local set-config host_name "http://localhost:8000"
+
+      - name: Start Frappe (background)
+        working-directory: frappe-bench
+        run: |
+          bench use test_site.local
+          nohup bench serve --port 8000 >../frappe.log 2>&1 &
+          for _ in $(seq 1 60); do
+            if curl -sf http://localhost:8000/api/method/ping >/dev/null; then
+              echo "frappe up"; exit 0
+            fi
+            sleep 2
+          done
+          echo "frappe failed to start"; tail -200 ../frappe.log; exit 1
+
+      - name: Build frappe-mcp-server
+        run: |
+          git clone --depth=1 "https://github.com/${MCP_REPO}.git" mcp-src
+          cd mcp-src
+          go build -o ../mcp-server ./
+
+      - name: Generate MCP config
+        run: |
+          cat > mcp-config.yaml <<'YAML'
+          server:
+            host: "0.0.0.0"
+            port: 8080
+            timeout: "30s"
+            max_connections: 100
+          erpnext:
+            base_url: "http://localhost:8000"
+            api_key: "dummy"
+            api_secret: "dummy"
+            timeout: "30s"
+          auth:
+            enabled: true
+            require_auth: true
+            oauth2:
+              token_info_url: "http://localhost:8000/api/method/frappe.integrations.oauth2.openid.userinfo"
+              issuer_url: "http://localhost:8000"
+              validate_remote: false
+          logging:
+            level: "info"
+            format: "json"
+          YAML
+
+      - name: Start frappe-mcp-server (background)
+        run: |
+          nohup ./mcp-server --config mcp-config.yaml >mcp.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -sf http://localhost:8080/health >/dev/null \
+               || curl -sf http://localhost:8080/ >/dev/null; then
+              echo "mcp up"; exit 0
+            fi
+            sleep 1
+          done
+          echo "mcp failed to start"; tail -200 mcp.log; exit 1
+
+      - name: Install agent deps
+        run: uv sync --all-extras
+
+      - name: Run integration tests
+        env:
+          AI_AGENT_INTEGRATION_LLM_BASE_URL: http://localhost:11434
+          AI_AGENT_INTEGRATION_LLM_MODEL: ${{ env.OLLAMA_MODEL }}
+          AI_AGENT_INTEGRATION_MCP_URL: http://localhost:8080/mcp
+          AI_AGENT_INTEGRATION_FRAPPE_URL: http://localhost:8000
+          AI_AGENT_INTEGRATION_FRAPPE_ADMIN_PASSWORD: admin
+        run: uv run pytest tests/integration/ -m integration -v
+
+      - name: Dump service logs on failure
+        if: failure()
+        run: |
+          echo "===== frappe.log =====" && tail -200 frappe.log || true
+          echo "===== mcp.log =====" && tail -200 mcp.log || true
+          echo "===== ollama =====" && docker logs ollama 2>&1 | tail -200 || true
 
   security:
     runs-on: ubuntu-latest
