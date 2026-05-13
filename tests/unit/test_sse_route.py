@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
@@ -167,3 +168,27 @@ async def test_sse_chat_route_rate_limits_after_burst():
     assert first.status_code != 429
     assert second.status_code != 429
     assert third.status_code == 429
+
+
+async def test_sse_chat_route_rejects_non_json_serialisable_context():
+    """The `context` field's _cap_context_size validator wraps
+    json.dumps in try/(TypeError, ValueError). A non-serialisable
+    value (here: NaN with allow_nan=False... no, that allows by
+    default; use a set instead) must produce a clean 422 with a
+    pydantic message, NOT bubble a TypeError out as a 500.
+
+    Pydantic refuses to construct dict[str, Any] from JSON that
+    contains a non-JSON value at the wire layer, so we go through
+    the ChatRequest schema and exercise the validator directly."""
+    from pydantic import ValidationError
+
+    from ai_agent.transport.sse import ChatRequest
+
+    # A set isn't JSON-serialisable. The validator must catch the
+    # TypeError from json.dumps and surface a clean ValidationError.
+    with pytest.raises(ValidationError) as excinfo:
+        ChatRequest(
+            message="hi",
+            context={"bad": {1, 2, 3}},  # type: ignore[dict-item]
+        )
+    assert "JSON-serialisable" in str(excinfo.value) or "context" in str(excinfo.value).lower()
