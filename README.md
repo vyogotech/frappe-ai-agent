@@ -133,7 +133,7 @@ All settings are loaded from environment or `.env` with the `AI_AGENT_` prefix. 
 |----------|---------|-------------|
 | `AI_AGENT_HOST` | `0.0.0.0` | Bind host |
 | `AI_AGENT_PORT` | `8484` | Bind port |
-| `AI_AGENT_WORKERS` | `4` | Uvicorn workers (production) |
+| `AI_AGENT_WORKERS` | `1` | Uvicorn workers. Wired into the Dockerfile CMD as `uvicorn --workers ${AI_AGENT_WORKERS:-1}`. Raise above 1 only with a shared checkpointer (see `AI_AGENT_AGENT_CHECKPOINTER`). |
 | `AI_AGENT_CORS_ORIGINS` | `["http://localhost:8000"]` | JSON list of credentialed-CORS origins. `"*"` is not allowed because cookies are forwarded |
 | `AI_AGENT_LLM_PROVIDER` | `ollama` | `ollama`, `openai`, `anthropic`, `google` |
 | `AI_AGENT_LLM_BASE_URL` | `http://localhost:11434` | Provider base URL |
@@ -144,6 +144,7 @@ All settings are loaded from environment or `.env` with the `AI_AGENT_` prefix. 
 | `AI_AGENT_LLM_NUM_CTX` | `16384` | Ollama context window. Ignored for hosted providers. The Ollama default of 2048 is too small for system prompt + tool results + answer |
 | `AI_AGENT_AGENT_RECURSION_LIMIT` | `50` | LangGraph graph recursion ceiling — small models need headroom while exploring doctype schemas before converging |
 | `AI_AGENT_AGENT_RATE_LIMIT` | `30/minute` | slowapi-format per-sid rate limit on `POST /api/v1/chat` (e.g. `100/hour`, `10/second`) |
+| `AI_AGENT_AGENT_CHECKPOINTER` | `memory` | LangGraph checkpointer backend. `memory` is process-local and **not safe with `workers > 1`** (see [Multi-worker deployments](#multi-worker-deployments)). `sqlite:/abs/path/to/ckpt.db` opens an `AsyncSqliteSaver` against the file. `sqlite::memory:` is in-process SQLite. Invalid values are rejected at startup. |
 | `AI_AGENT_MCP_SERVER_URL` | `http://localhost:8080/mcp` | MCP Streamable HTTP endpoint |
 | `AI_AGENT_FRAPPE_URL` | `http://localhost:8000` | Frappe URL for chat history writes |
 | `AI_AGENT_OTEL_ENDPOINT` | _empty_ | OTLP gRPC endpoint. Empty = tracing disabled |
@@ -169,6 +170,22 @@ Tools are loaded per-request from `frappe-mcp-server` via the Streamable HTTP tr
 `tools/list` is bounded by a 20 s timeout. If MCP is unreachable, the user sees a single SSE `error` event and a `done` frame; the stream does not hang.
 
 Every loaded tool is wrapped by `install_tool_error_handler` so that any exception (MCP errors, Frappe permission denials, httpx timeouts) becomes a string tool-observation the LLM can read and explain to the user. Permission errors get a clearer prefix (`Access denied: permission error — …`). Without this wrapping, non-`ToolException` errors escape LangChain's ToolNode and abort the whole graph run.
+
+## Multi-worker deployments
+
+The LangGraph agent keeps per-conversation state in a *checkpointer* — the same thread id (== Frappe chat session id) replays the conversation history on the next turn. The default `AI_AGENT_AGENT_CHECKPOINTER=memory` is process-local. With the default `AI_AGENT_WORKERS=1` (single worker) this is fine. Raise `AI_AGENT_WORKERS` above 1 and a follow-up turn has a 1-in-N chance of landing on the worker that has the prior checkpoint — the LLM "forgets" what was said even though the Frappe history rows preserve it for the UI scrollback.
+
+If you run with `workers > 1`, set a shared backend:
+
+```bash
+AI_AGENT_AGENT_CHECKPOINTER=sqlite:/var/lib/frappe-ai-agent/checkpoints.db
+```
+
+The agent uses [`AsyncSqliteSaver`](https://langchain-ai.github.io/langgraph/reference/checkpoints/#langgraph.checkpoint.sqlite.aio.AsyncSqliteSaver) (`langgraph-checkpoint-sqlite`). LangGraph's docs caution against SQLite under heavy write concurrency, but a single Frappe deployment with a handful of users is well inside its envelope.
+
+A loud `checkpointer_memory_multi_worker_unsafe` warning fires at startup if `workers > 1` AND `agent_checkpointer == memory`, with remediation advice in the log fields. The warning is at WARNING level, so any aggregator with a default-severity filter will pick it up.
+
+For ephemeral / dev use, `sqlite::memory:` keeps state inside the process (same constraint as `memory`, with the SQLite backend's overhead).
 
 ## Chat history
 
