@@ -250,6 +250,26 @@ class TestParseBlocks:
         assert isinstance(blocks[1], TextBlock) and blocks[1].content == "inside"
         assert isinstance(blocks[2], TextBlock) and blocks[2].content == "After"
 
+    def test_chart_alias_set_matches_chart_block_literal(self):
+        """`_CHART_TYPES` in parser.py is hand-synced with the
+        ChartBlock.chart_type Literal. Drift here is silent: if
+        someone adds a new chart subtype to the Pydantic model but
+        forgets the alias set, the parser will route the alias
+        through TextBlock with `[Unknown block type: sankey]`
+        instead of through ChartBlock. The model and the alias set
+        must be the same set at all times."""
+        from typing import get_args
+
+        from ai_agent.blocks.models import ChartBlock
+        from ai_agent.blocks.parser import _CHART_TYPES
+
+        chart_type_field = ChartBlock.model_fields["chart_type"]
+        literal_values = set(get_args(chart_type_field.annotation))
+        assert literal_values == set(_CHART_TYPES), (
+            "_CHART_TYPES frozenset must exactly mirror ChartBlock.chart_type Literal; "
+            f"model has {literal_values}, parser has {set(_CHART_TYPES)}"
+        )
+
     def test_chart_truncation_in_parser(self):
         import json
 

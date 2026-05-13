@@ -31,7 +31,11 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.1.0
       - run: uv sync --all-extras
-      - run: uv run pytest tests/unit/ tests/features/ -v --cov=ai_agent --cov-report=xml
+      # --cov-fail-under: hard floor so a coverage regression breaks
+      # CI instead of silently merging. 95% is well below today's
+      # ~98% but well above what counts as "real test coverage";
+      # bump if/when the project reliably stays higher.
+      - run: uv run pytest tests/unit/ tests/features/ -v --cov=ai_agent --cov-report=xml --cov-fail-under=95
       - uses: codecov/codecov-action@v6
         with:
           files: coverage.xml
@@ -74,14 +78,22 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Set up Python ${{ env.FRAPPE_PY }} (Frappe + agent share one interp)
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ env.FRAPPE_PY }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "20"
 
+      # Stay on v5: setup-go@v6 sets GOTOOLCHAIN=local, which prevents
+      # the auto-toolchain download Go 1.21+ does for go.mod files that
+      # require a newer Go than the one setup-go installed. The build
+      # target — vyogotech/frappe-mcp-server — declares `go 1.25.0` in
+      # its go.mod (verified 2026-05-13). With v6 + go-version: "1.23"
+      # the build would fail; v5 still works because v5 lets Go fetch
+      # 1.25 at build time. Bump alongside go-version: "1.25" when both
+      # are touched together.
       - uses: actions/setup-go@v5
         with:
           go-version: "1.23"

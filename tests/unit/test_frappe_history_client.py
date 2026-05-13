@@ -3,6 +3,7 @@ import json
 import httpx
 import pytest
 import respx
+import structlog
 
 from ai_agent.integrations.frappe_history import FrappeHistoryClient
 
@@ -213,6 +214,116 @@ async def test_write_proceeds_without_token_when_csrf_fetch_fails():
     assert "X-Frappe-CSRF-Token" not in post.headers
 
 
+# ─── Connection reuse ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_writes_reuse_single_async_client_per_instance():
+    """Per chat turn we make 1 CSRF GET + 2-3 POST writes. Opening a
+    fresh AsyncClient for each was wasteful — every call paid a new
+    connection setup (TLS handshake when behind HTTPS) instead of
+    reusing the persistent connection. After this fix, all writes
+    from one FrappeHistoryClient instance share one underlying
+    AsyncClient — verified by patching the constructor and counting
+    instantiations."""
+    import unittest.mock as _mock
+
+    _mock_csrf_ok()
+    respx.post(_MESSAGE_URL).mock(
+        return_value=httpx.Response(200, json={"data": {"name": "msg-1"}})
+    )
+
+    real_init = httpx.AsyncClient.__init__
+    init_calls: list[dict] = []
+
+    def _spy_init(self, *args, **kwargs):
+        init_calls.append(kwargs)
+        return real_init(self, *args, **kwargs)
+
+    with _mock.patch.object(httpx.AsyncClient, "__init__", _spy_init):
+        client = FrappeHistoryClient(base_url="http://frappe:8000")
+        await client.save_message(sid="abc", session="s", role="user", content="a")
+        await client.save_message(sid="abc", session="s", role="user", content="b")
+        await client.save_message(sid="abc", session="s", role="user", content="c")
+        await client.aclose()
+
+    # One client for all four HTTP calls (1 CSRF GET + 3 POSTs).
+    assert len(init_calls) == 1, (
+        f"expected 1 AsyncClient instantiation, got {len(init_calls)}: {init_calls!r}"
+    )
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_aclose_is_idempotent():
+    """aclose() must be safe to call multiple times — the lifespan
+    teardown may run it after a context manager already cleaned up."""
+    _mock_csrf_ok()
+    respx.post(_MESSAGE_URL).mock(
+        return_value=httpx.Response(200, json={"data": {"name": "msg-1"}})
+    )
+    client = FrappeHistoryClient(base_url="http://frappe:8000")
+    await client.save_message(sid="abc", session="s", role="user", content="hi")
+    await client.aclose()
+    await client.aclose()  # idempotent — must not raise
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_use_after_close_raises_instead_of_leaking_new_client():
+    """Regression guard. The earlier implementation reset `_client = None`
+    on aclose() but left `_closed = True`, and `_get_client()` would
+    happily build a fresh AsyncClient on the next write — leaving
+    `_closed = True` meaning the next aclose() would return early and
+    never close that new pool. Reproduction on the prior code:
+
+        client1 = c._get_client()      # _closed=False
+        await c.aclose()               # _closed=True, _client=None
+        client2 = c._get_client()      # builds a NEW client, _closed stays True
+        await c.aclose()               # returns early, client2.is_closed=False  ← LEAK
+
+    Now `_get_client()` raises RuntimeError after close so the leak
+    is impossible. Lifespan teardown runs aclose() once at process
+    exit; any write after that is a programming error and must fail
+    loudly, not silently leak a connection pool."""
+    _mock_csrf_ok()
+    respx.post(_MESSAGE_URL).mock(
+        return_value=httpx.Response(200, json={"data": {"name": "msg-1"}})
+    )
+    client = FrappeHistoryClient(base_url="http://frappe:8000")
+    await client.save_message(sid="abc", session="s", role="user", content="hi")
+    await client.aclose()
+    with pytest.raises(RuntimeError, match="closed"):
+        await client.save_message(sid="abc", session="s", role="user", content="too-late")
+
+
+def test_looks_like_csrf_error_returns_false_when_text_access_raises():
+    """The helper reads `response.text` which can in pathological cases
+    raise (e.g. malformed encoding declarations). The except branch
+    must swallow the exception and return False — a non-CSRF error
+    should fall through to the standard write-failed handling, not
+    trigger an unbounded retry loop."""
+    import httpx
+
+    from ai_agent.integrations.frappe_history import _looks_like_csrf_error
+
+    class _ExplodingResponse:
+        @property
+        def text(self) -> str:
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    # _looks_like_csrf_error is duck-typed against `response.text` so a
+    # stand-in that raises on .text drives the exception arm cleanly.
+    assert _looks_like_csrf_error(_ExplodingResponse()) is False  # type: ignore[arg-type]
+
+    # Sanity: the happy-path branches still work.
+    ok_response = httpx.Response(400, json={"exc_type": "CSRFTokenError"})
+    assert _looks_like_csrf_error(ok_response) is True
+    not_csrf = httpx.Response(400, json={"exc_type": "ValidationError"})
+    assert _looks_like_csrf_error(not_csrf) is False
+
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_write_proceeds_without_token_when_csrf_not_in_html():
@@ -232,3 +343,111 @@ async def test_write_proceeds_without_token_when_csrf_not_in_html():
     assert name == "msg-1"
     post = next(c.request for c in respx.calls if c.request.method == "POST")
     assert "X-Frappe-CSRF-Token" not in post.headers
+
+
+# ─── Failure signal: structured log + OTEL counter ───────────────────────
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_session_write_failure_emits_structured_event():
+    """A history-write failure must surface as a structured
+    `frappe_history_write_failed` event with `kind` and `status_code`
+    fields. Without these aggregable fields, a sustained Frappe-down
+    state is invisible to dashboards."""
+    _mock_csrf_ok()
+    respx.post(_SESSION_URL).mock(return_value=httpx.Response(500))
+    client = FrappeHistoryClient(base_url="http://frappe:8000")
+
+    with structlog.testing.capture_logs() as logs:
+        result = await client.create_session(sid="abc", title="t", context_json="{}")
+
+    assert result is None
+    failures = [r for r in logs if r.get("event") == "frappe_history_write_failed"]
+    assert len(failures) == 1, f"expected 1 structured failure event, got {logs!r}"
+    assert failures[0]["kind"] == "session"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_message_write_failure_emits_structured_event():
+    _mock_csrf_ok()
+    respx.post(_MESSAGE_URL).mock(return_value=httpx.Response(500))
+    client = FrappeHistoryClient(base_url="http://frappe:8000")
+
+    with structlog.testing.capture_logs() as logs:
+        result = await client.save_message(sid="abc", session="s", role="user", content="x")
+
+    assert result is None
+    failures = [r for r in logs if r.get("event") == "frappe_history_write_failed"]
+    assert len(failures) == 1
+    assert failures[0]["kind"] == "message"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_session_write_emits_history_span_with_kind(otel_spans):
+    """Each write is wrapped in an `agent.history.write` span carrying
+    a `kind` attribute, so a trace UI can show the per-kind breakdown
+    under the parent agent.chat_turn span without consulting metric
+    cardinality. `otel_spans` is the shared session-scoped exporter
+    defined in tests/unit/conftest.py."""
+    _mock_csrf_ok()
+    respx.post(_SESSION_URL).mock(
+        return_value=httpx.Response(200, json={"data": {"name": "sess-1"}})
+    )
+    client = FrappeHistoryClient(base_url="http://frappe:8000")
+    await client.create_session(sid="abc", title="t", context_json="{}")
+
+    spans = otel_spans.get_finished_spans()
+    history_spans = [s for s in spans if s.name == "agent.history.write"]
+    assert len(history_spans) == 1
+    assert dict(history_spans[0].attributes or {}).get("kind") == "session"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_write_failures_increment_otel_counter():
+    """`agent.history.write_failures` is the metric a Prometheus/OTLP
+    collector scrapes to alert on Frappe-write outages. Without it, a
+    100%-failure rate looks identical to 0% from outside the process."""
+    from opentelemetry import metrics
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+    metrics.set_meter_provider(provider)
+
+    _mock_csrf_ok()
+    respx.post(_SESSION_URL).mock(return_value=httpx.Response(500))
+    respx.post(_MESSAGE_URL).mock(return_value=httpx.Response(500))
+    client = FrappeHistoryClient(base_url="http://frappe:8000")
+
+    await client.create_session(sid="abc", title="t", context_json="{}")
+    await client.save_message(sid="abc", session="s", role="user", content="x")
+    await client.save_message(sid="abc", session="s", role="user", content="y")
+
+    # OTEL's MetricsData union (Sum / Gauge / Histogram / ExponentialHistogram)
+    # makes pyright unhappy without narrowing; we only emit a Counter so the
+    # data points are NumberDataPoint with a numeric .value. The narrowing
+    # below is type-runtime-safe; the cast quiets pyright on the union access.
+    from opentelemetry.sdk.metrics.export import MetricsData, NumberDataPoint, Sum
+
+    md = reader.get_metrics_data()
+    assert isinstance(md, MetricsData)
+    points: dict[str, int] = {}
+    for rm in md.resource_metrics:
+        for sm in rm.scope_metrics:
+            for metric in sm.metrics:
+                if metric.name != "agent.history.write_failures":
+                    continue
+                data = metric.data
+                assert isinstance(data, Sum)
+                for dp in data.data_points:
+                    assert isinstance(dp, NumberDataPoint)
+                    attrs = dict(dp.attributes) if dp.attributes else {}
+                    kind = str(attrs.get("kind", "?"))
+                    points[kind] = points.get(kind, 0) + int(dp.value)
+    assert points.get("session") == 1, f"expected 1 session failure, got {points!r}"
+    assert points.get("message") == 2, f"expected 2 message failures, got {points!r}"

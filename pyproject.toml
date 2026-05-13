@@ -27,6 +27,7 @@ dependencies = [
     "opentelemetry-instrumentation-fastapi>=0.48",
     "httpx>=0.27",
     "slowapi>=0.1.9",
+    "langgraph-checkpoint-sqlite>=3.1.0",
 ]
 
 [project.optional-dependencies]
@@ -38,7 +39,7 @@ dev = [
     "pytest-bdd>=7.0",
     "pytest-cov>=6.0",
     "ruff>=0.8",
-    "pyright>=1.1",
+    "pyright>=1.1.409",
     "respx>=0.21",
 ]
 

@@ -86,15 +86,17 @@ Streaming chat endpoint. Returns `text/event-stream`.
 
 | `type`          | Payload                                                                 |
 |-----------------|-------------------------------------------------------------------------|
-| `session`       | `{ id }` — sent once, before any other event                            |
-| `status`        | `{ message }` — informational (reserved for future use)                 |
-| `tool_call`     | `{ name, arguments }` — emitted when the agent invokes a tool           |
-| `content`       | `{ text }` — prose token chunks (streams as the LLM generates)          |
-| `content_block` | `{ block }` — a complete parsed content block (chart, table, kpi, …)    |
-| `error`         | `{ message }` — fatal error; followed by `done`                         |
-| `done`          | `{ tools_called, data_quality, timestamp }` — terminal frame            |
+| `session`       | `{ id: str }` — sent once, before any other event                       |
+| `status`        | `{ message: str }` — informational (reserved for future use)            |
+| `tool_call`     | `{ name: str, arguments: dict }` — emitted when the agent invokes a tool |
+| `content`       | `{ text: str }` — prose token chunks (streams as the LLM generates)     |
+| `content_block` | `{ block: dict }` — a complete parsed content block (chart, table, …)   |
+| `error`         | `{ message: str }` — fatal error; followed by `done`                    |
+| `done`          | `{ tools_called: list[str], data_quality, timestamp: str }`             |
 
 `data_quality` is `"high"` on success, `"low"` if the turn ended in error.
+
+The wire contract is encoded as `TypedDict`s in [`src/ai_agent/transport/sse_events.py`](src/ai_agent/transport/sse_events.py) (`SessionEvent`, `StatusEvent`, `ToolCallEvent`, `ContentEvent`, `ContentBlockEvent`, `ErrorEvent`, `DoneEvent`, plus the `SSEEvent` union). A `validate_event(event: dict)` helper in the same module raises `ValueError` on any drift from the contract — `tests/unit/test_chat_service.py::test_every_emitted_event_matches_sse_contract` runs it over every event the service emits in a typical turn, so adding a new field server-side without updating the TypedDict is caught at CI time, not in a frontend bug report.
 
 ### `GET /health`
 
@@ -133,7 +135,7 @@ All settings are loaded from environment or `.env` with the `AI_AGENT_` prefix. 
 |----------|---------|-------------|
 | `AI_AGENT_HOST` | `0.0.0.0` | Bind host |
 | `AI_AGENT_PORT` | `8484` | Bind port |
-| `AI_AGENT_WORKERS` | `4` | Uvicorn workers (production) |
+| `AI_AGENT_WORKERS` | `1` | Uvicorn workers. Wired into the Dockerfile CMD as `uvicorn --workers ${AI_AGENT_WORKERS:-1}`. Raise above 1 only with a shared checkpointer (see `AI_AGENT_AGENT_CHECKPOINTER`). |
 | `AI_AGENT_CORS_ORIGINS` | `["http://localhost:8000"]` | JSON list of credentialed-CORS origins. `"*"` is not allowed because cookies are forwarded |
 | `AI_AGENT_LLM_PROVIDER` | `ollama` | `ollama`, `openai`, `anthropic`, `google` |
 | `AI_AGENT_LLM_BASE_URL` | `http://localhost:11434` | Provider base URL |
@@ -144,6 +146,7 @@ All settings are loaded from environment or `.env` with the `AI_AGENT_` prefix. 
 | `AI_AGENT_LLM_NUM_CTX` | `16384` | Ollama context window. Ignored for hosted providers. The Ollama default of 2048 is too small for system prompt + tool results + answer |
 | `AI_AGENT_AGENT_RECURSION_LIMIT` | `50` | LangGraph graph recursion ceiling — small models need headroom while exploring doctype schemas before converging |
 | `AI_AGENT_AGENT_RATE_LIMIT` | `30/minute` | slowapi-format per-sid rate limit on `POST /api/v1/chat` (e.g. `100/hour`, `10/second`) |
+| `AI_AGENT_AGENT_CHECKPOINTER` | `memory` | LangGraph checkpointer backend. `memory` is process-local and **not safe with `workers > 1`** (see [Multi-worker deployments](#multi-worker-deployments)). `sqlite:/abs/path/to/ckpt.db` opens an `AsyncSqliteSaver` against the file. `sqlite::memory:` is in-process SQLite. Invalid values are rejected at startup. |
 | `AI_AGENT_MCP_SERVER_URL` | `http://localhost:8080/mcp` | MCP Streamable HTTP endpoint |
 | `AI_AGENT_FRAPPE_URL` | `http://localhost:8000` | Frappe URL for chat history writes |
 | `AI_AGENT_OTEL_ENDPOINT` | _empty_ | OTLP gRPC endpoint. Empty = tracing disabled |
@@ -169,6 +172,22 @@ Tools are loaded per-request from `frappe-mcp-server` via the Streamable HTTP tr
 `tools/list` is bounded by a 20 s timeout. If MCP is unreachable, the user sees a single SSE `error` event and a `done` frame; the stream does not hang.
 
 Every loaded tool is wrapped by `install_tool_error_handler` so that any exception (MCP errors, Frappe permission denials, httpx timeouts) becomes a string tool-observation the LLM can read and explain to the user. Permission errors get a clearer prefix (`Access denied: permission error — …`). Without this wrapping, non-`ToolException` errors escape LangChain's ToolNode and abort the whole graph run.
+
+## Multi-worker deployments
+
+The LangGraph agent keeps per-conversation state in a *checkpointer* — the same thread id (== Frappe chat session id) replays the conversation history on the next turn. The default `AI_AGENT_AGENT_CHECKPOINTER=memory` is process-local. With the default `AI_AGENT_WORKERS=1` (single worker) this is fine. Raise `AI_AGENT_WORKERS` above 1 and a follow-up turn has a 1-in-N chance of landing on the worker that has the prior checkpoint — the LLM "forgets" what was said even though the Frappe history rows preserve it for the UI scrollback.
+
+If you run with `workers > 1`, set a shared backend:
+
+```bash
+AI_AGENT_AGENT_CHECKPOINTER=sqlite:/var/lib/frappe-ai-agent/checkpoints.db
+```
+
+The agent uses [`AsyncSqliteSaver`](https://langchain-ai.github.io/langgraph/reference/checkpoints/#langgraph.checkpoint.sqlite.aio.AsyncSqliteSaver) (`langgraph-checkpoint-sqlite`). LangGraph's docs caution against SQLite under heavy write concurrency, but a single Frappe deployment with a handful of users is well inside its envelope.
+
+A loud `checkpointer_memory_multi_worker_unsafe` warning fires at startup if `workers > 1` AND `agent_checkpointer == memory`, with remediation advice in the log fields. The warning is at WARNING level, so any aggregator with a default-severity filter will pick it up.
+
+For ephemeral / dev use, `sqlite::memory:` keeps state inside the process (same constraint as `memory`, with the SQLite backend's overhead).
 
 ## Chat history
 
@@ -247,8 +266,148 @@ uv run pytest --cov=ai_agent           # coverage
 ## Observability
 
 - **Structured logging** via `structlog`. Default JSON output to stdout; switch to a human-readable renderer with `AI_AGENT_LOG_FORMAT=console`. `uvicorn.access`, `httpx`, and `httpcore` are pinned to WARNING to keep the stream readable.
-- **Request correlation** — every response carries an `X-Request-ID` header; clients can pin a value by sending the same header.
-- **OpenTelemetry** — set `AI_AGENT_OTEL_ENDPOINT` to an OTLP gRPC collector to enable FastAPI instrumentation and span export. Empty endpoint = tracing off (no exporter wired in).
+- **Request correlation** — every response carries an `X-Request-ID` header (incoming value echoed if the client sets one, otherwise a fresh UUID). The same id is bound into `structlog.contextvars` for the duration of the request, so any log emitted inside a handler carries `request_id=…` automatically.
+- **Per-turn audit log** — `ChatService.handle_message` emits one info-level `chat_turn_completed` event at the end of every turn with `duration_ms`, `tools_called`, `tools_called_count`, `content_chars`, `block_events_emitted`, `failed`, `session_id`, and `error_type` on failure. One log line per turn answers "what happened on this chat call" without grepping multiple streams.
+- **OpenTelemetry tracing** — set `AI_AGENT_OTEL_ENDPOINT` to an OTLP gRPC collector to enable export. Tracing is off when the env var is empty. Spans emitted per chat turn (nested under the FastAPI auto-instrumented HTTP span):
+  - `agent.chat_turn` (the whole handler — `session_id`, `tools_called_count`, `content_chars`, `block_events_emitted`, `failed`, `error_type`)
+  - `agent.load_tools` (MCP `tools/list` call — `tool_count`)
+  - `agent.graph_run` (LangGraph `astream_events` loop)
+  - `agent.history.write` (each Frappe REST write — `kind`, `status_code`, `failed`)
+
+  On the failure path the `agent.chat_turn` span carries an ERROR status and the original exception via `record_exception`, so a trace UI bubbles it up.
+- **OpenTelemetry metrics** — the OTEL Metrics API is wired with one counter: `agent.history.write_failures` (attribute `kind=session|message`). Lets a Prometheus/OTLP collector alert on sustained Frappe-write outages (e.g. `rate(agent_history_write_failures_total[5m]) > 0`) that the per-call WARN logs alone could not surface.
+
+## Runbook
+
+Practical "got paged at 3am" diagnosis paths. Each scenario lists the
+visible symptom, the signals to consult, and the remediation. Assumes
+the deployment has `AI_AGENT_LOG_FORMAT=json` (default) and the OTEL
+spans / counters from the Operability branch are wired.
+
+### Chat requests return 500 / clients see `error` events
+
+**Symptoms:** FE shows a red error bubble; SSE stream carries one
+`error` event followed by `done` with `data_quality: "low"`.
+
+1. Grep the agent log for `chat_handle_message_failed` — the
+   `root_cause_type` field names the first concrete exception
+   underneath any TaskGroup wrapper.
+2. Inspect the `agent.chat_turn` span (status: ERROR) in your trace UI.
+   `record_exception` on the span carries the type / message / stack;
+   the child spans (`agent.load_tools`, `agent.graph_run`) show which
+   phase blew up.
+3. Common causes:
+   - MCP unreachable → `agent.load_tools` span error;
+     `RuntimeError: MCP tools/list timed out after 20s`
+   - LLM unreachable → `agent.graph_run` span error; httpx connect /
+     timeout under it
+   - Frappe Login expired → tool observations return
+     `Access denied: permission error — …` (those are not errors,
+     they're tool results; the LLM should explain them in the reply)
+
+### MCP `/health?detail=true` reports MCP not OK
+
+**Symptoms:** `/health?detail=true` returns `{"mcp": {"ok": false, ...}}`.
+
+1. The probe hits `<mcp_server_url's host>/health` — it's a liveness
+   probe only; it does not call `tools/list`. A frappe-mcp-server up
+   on its HTTP port but failing tools/list can still report healthy.
+2. Verify directly: `curl -s http://<mcp-host>:<port>/health`.
+3. If health is OK but chats fail with MCP errors, the issue is
+   tools/list — exercise via `curl` or the `agent.load_tools` span.
+
+### Frappe history writes are silently dropped
+
+**Symptoms:** Conversations work fine but AI Chat Session / AI Chat
+Message rows stop appearing in Frappe.
+
+1. Grep `frappe_history_write_failed` in agent logs — `kind`
+   (session/message), `error_type`, and `status_code` (when HTTP)
+   identify what's failing.
+2. If you scrape OTEL metrics, `agent.history.write_failures`
+   counter (labels: `kind`) is non-zero. An alert
+   `rate(agent_history_write_failures_total[5m]) > 0` is the right
+   shape for this.
+3. Common causes: Frappe down (transport errors), session cookie
+   expired (401), CSRF token wedged (400 with `CSRFTokenError` —
+   the client auto-refreshes once, but a sustained block means the
+   `/app` page is unreachable, see the
+   `frappe_history_csrf_fetch_failed` log).
+
+### Multi-worker conversation amnesia ("AI keeps forgetting")
+
+**Symptoms:** First turn in a session works; second turn behaves as
+if the prior context never happened, even though Frappe rows show
+both turns.
+
+1. Look for a startup `checkpointer_memory_multi_worker_unsafe`
+   warning. It fires when `AI_AGENT_WORKERS > 1` and
+   `AI_AGENT_AGENT_CHECKPOINTER=memory`. Each worker has its own
+   in-memory checkpointer, so a follow-up turn that lands on a
+   different worker sees a fresh thread state.
+2. Switch to a shared backend (see
+   [Multi-worker deployments](#multi-worker-deployments)) or set
+   `AI_AGENT_WORKERS=1` if a single worker is enough for your load.
+
+### Rate-limit `429`s
+
+**Symptoms:** Specific user gets `429 Too Many Requests` from
+`POST /api/v1/chat`.
+
+1. The default limit is `30/minute` per `sid`. If that's wrong for
+   your deployment, tune `AI_AGENT_AGENT_RATE_LIMIT` (slowapi
+   syntax: `<count>/<period>`).
+2. Anonymous callers (missing/empty `sid` cookie) get `401` and
+   **do not** consume a token from the IP-keyed bucket, so a spray
+   from one IP cannot lock out shared-NAT users.
+
+### Agent loops past the recursion limit
+
+**Symptoms:** `chat_handle_message_failed` log with `root_cause_type`
+mentioning `GraphRecursionError`.
+
+1. The agent is stuck exploring schemas without converging — common
+   with small local models on complex multi-doctype queries.
+2. Short-term: bump `AI_AGENT_AGENT_RECURSION_LIMIT` (default 50;
+   75-100 is reasonable for a small model on a heavy query).
+3. Longer-term: a larger model (qwen2.5:14b+) usually fixes this.
+
+### SSE stream hangs / never closes
+
+**Symptoms:** Client connection open indefinitely; no `done` frame.
+
+1. `chat_turn_completed` log absent for that request means the
+   generator never reached `done`. Check `X-Request-ID` and trace
+   the matching `agent.chat_turn` span — if it's still open, the
+   request is genuinely live.
+2. The 20s MCP `tools/list` timeout is the only hard internal
+   bound — beyond that, the LLM is presumed to be streaming.
+3. If the LLM provider hangs, the request will hang too. Configure
+   an httpx timeout on the LLM client via the provider's options
+   if your provider supports it.
+
+### Known limitation — cancelled turns leave no `chat_turn_completed` log
+
+When a client disconnects mid-stream, Starlette calls `aclose()` on
+the async generator, raising `GeneratorExit` at the current `yield`.
+`GeneratorExit` is `BaseException`, not `Exception`, so the existing
+`except Exception` in `ChatService.handle_message` does not catch
+it; control unwinds through the `agent.chat_turn` span (which ends
+cleanly with no ERROR status — correct, cancellation isn't an
+error). The trailing `logger.info("chat_turn_completed", ...)` line
+sits after `yield "done"`, so on a cancelled turn it never fires.
+
+**Detection today:** a `request_id` value that appears in the early
+request lifecycle (the `RequestIDMiddleware` bind, or the initial
+`session` SSE event) but does NOT appear in a subsequent
+`chat_turn_completed` line is a cancelled turn.
+
+A future change may emit a dedicated `chat_turn_cancelled` event in
+the `GeneratorExit` path. It is intentionally not implemented today
+to avoid the yield-in-cancellation-path `RuntimeError` that the
+explicit non-`finally` design in `src/ai_agent/services/chat.py`
+(see comments around the inner `try/except Exception:` block in
+`handle_message`) was added to avoid.
 
 ## Docker
 

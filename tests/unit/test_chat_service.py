@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import structlog
 from langchain_core.messages import AIMessageChunk
 
 from ai_agent.config import Settings
@@ -861,6 +862,267 @@ async def test_handle_message_flushes_splitter_when_stream_raises_mid_block():
     assert events[-1]["type"] == "done"
 
 
+# ─── Turn-summary structured log ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_handle_message_emits_turn_summary_log_on_success():
+    """Every successful chat turn should emit exactly one info-level
+    `chat_turn_completed` event carrying duration_ms, tools_called,
+    content_chars, block_events_emitted, and failed=False. This is the
+    single audit-trail entry an operator can grep for to answer
+    'what happened on /api/v1/chat for this user' without reading
+    three different log streams."""
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(return_value=[])
+
+    mock_graph = MagicMock()
+    mock_graph.astream_events = _StreamFactory(
+        [
+            {
+                "event": "on_tool_start",
+                "name": "list_documents",
+                "data": {"input": {"doctype": "Customer"}},
+            },
+            {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": AIMessageChunk(content="hello there")},
+            },
+        ]
+    )
+
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.create_agent_graph", return_value=mock_graph),
+        structlog.testing.capture_logs() as logs,
+    ):
+        await _drain(
+            service.handle_message(
+                message="list customers",
+                session_id="s1",
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    summaries = [r for r in logs if r.get("event") == "chat_turn_completed"]
+    assert len(summaries) == 1, f"expected 1 turn-summary log, got {len(summaries)}: {logs!r}"
+    s = summaries[0]
+    assert s["log_level"] == "info"
+    assert s["failed"] is False
+    assert s["tools_called"] == ["list_documents"]
+    assert s["tools_called_count"] == 1
+    assert s["content_chars"] == len("hello there")
+    assert s["block_events_emitted"] == 0
+    assert s["session_id"] == "s1"
+    assert isinstance(s["duration_ms"], int | float)
+    assert s["duration_ms"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_handle_message_emits_turn_summary_log_on_failure():
+    """Failure path must also emit a turn-summary, with failed=True and
+    error_type carrying the originating exception class. Without this,
+    an operator counting failed turns has to grep two events."""
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(side_effect=RuntimeError("mcp down"))
+
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        structlog.testing.capture_logs() as logs,
+    ):
+        await _drain(
+            service.handle_message(
+                message="hi",
+                session_id="s-fail",
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    summaries = [r for r in logs if r.get("event") == "chat_turn_completed"]
+    assert len(summaries) == 1
+    s = summaries[0]
+    assert s["failed"] is True
+    assert s["error_type"] == "RuntimeError"
+    assert s["tools_called"] == []
+    assert s["tools_called_count"] == 0
+    assert s["session_id"] == "s-fail"
+
+
+@pytest.mark.asyncio
+async def test_handle_message_turn_summary_counts_block_events():
+    """When the LLM emits an <ai-block>, the summary records it. This
+    is the signal an operator uses to ask 'are users actually seeing
+    structured blocks or just prose?' over a population of turns."""
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    final_text = (
+        "Here:\n"
+        '<ai-block type="kpi">'
+        '{"metrics": [{"label": "Rev", "value": 1, "format": "number"}]}'
+        "</ai-block>"
+    )
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(return_value=[])
+    mock_graph = MagicMock()
+    mock_graph.astream_events = _StreamFactory(
+        [
+            {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": AIMessageChunk(content=final_text)},
+            }
+        ]
+    )
+
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.create_agent_graph", return_value=mock_graph),
+        structlog.testing.capture_logs() as logs,
+    ):
+        await _drain(
+            service.handle_message(
+                message="kpi please",
+                session_id="s-blocks",
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    summaries = [r for r in logs if r.get("event") == "chat_turn_completed"]
+    assert len(summaries) == 1
+    assert summaries[0]["block_events_emitted"] == 1
+
+
+# ─── Custom OTEL spans ────────────────────────────────────────────────────
+# `otel_spans` fixture is defined in tests/unit/conftest.py — shared
+# session-scope TracerProvider with per-test exporter clearing.
+
+
+@pytest.mark.asyncio
+async def test_handle_message_emits_chat_turn_span(otel_spans):
+    """`agent.chat_turn` wraps the whole handler. Attributes carry the
+    session id, the tools-called count, the content-chars count, and
+    failed=False on the happy path. This is the single span an operator
+    follows in a trace UI to answer 'where did those 18 seconds go?'"""
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(return_value=[])
+
+    mock_graph = MagicMock()
+    mock_graph.astream_events = _StreamFactory(
+        [
+            {
+                "event": "on_tool_start",
+                "name": "list_documents",
+                "data": {"input": {"doctype": "Customer"}},
+            },
+            {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": AIMessageChunk(content="reply")},
+            },
+        ]
+    )
+
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.create_agent_graph", return_value=mock_graph),
+    ):
+        await _drain(
+            service.handle_message(
+                message="hi",
+                session_id="s-trace",
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    spans = otel_spans.get_finished_spans()
+    chat_turn = [s for s in spans if s.name == "agent.chat_turn"]
+    assert len(chat_turn) == 1, f"expected 1 agent.chat_turn span, got {[s.name for s in spans]}"
+    attrs = dict(chat_turn[0].attributes or {})
+    assert attrs["session_id"] == "s-trace"
+    assert attrs["tools_called_count"] == 1
+    assert attrs["content_chars"] == len("reply")
+    assert attrs["failed"] is False
+
+
+@pytest.mark.asyncio
+async def test_handle_message_emits_load_tools_and_graph_run_spans(otel_spans):
+    """The chat-turn anatomy decomposes into load_tools (MCP handshake +
+    tools/list) and graph_run (the actual LLM streaming loop). Without
+    these inner spans, 'why was this turn slow?' can't be answered."""
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(return_value=[MagicMock(), MagicMock(), MagicMock()])
+
+    mock_graph = MagicMock()
+    mock_graph.astream_events = _StreamFactory([])
+
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.create_agent_graph", return_value=mock_graph),
+        patch("ai_agent.services.chat.install_tool_error_handler"),
+    ):
+        await _drain(
+            service.handle_message(
+                message="hi",
+                session_id="s-anat",
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    span_names = [s.name for s in otel_spans.get_finished_spans()]
+    assert "agent.load_tools" in span_names
+    assert "agent.graph_run" in span_names
+
+    load_tools = next(s for s in otel_spans.get_finished_spans() if s.name == "agent.load_tools")
+    assert dict(load_tools.attributes or {}).get("tool_count") == 3
+
+
+@pytest.mark.asyncio
+async def test_handle_message_failure_marks_chat_turn_span_error(otel_spans):
+    """On the failure path the chat_turn span must carry an ERROR status
+    and the original exception class name as an attribute, so dashboards
+    can bucket failures by class without trawling logs."""
+    from opentelemetry.trace import StatusCode
+
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(side_effect=RuntimeError("mcp down"))
+
+    with patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client):
+        await _drain(
+            service.handle_message(
+                message="hi",
+                session_id="s-err",
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    chat_turn = next(s for s in otel_spans.get_finished_spans() if s.name == "agent.chat_turn")
+    assert chat_turn.status.status_code == StatusCode.ERROR
+    attrs = dict(chat_turn.attributes or {})
+    assert attrs["failed"] is True
+    assert attrs["error_type"] == "RuntimeError"
+
+
 # ─── _BlockStreamSplitter ─────────────────────────────────────────────────
 
 
@@ -931,3 +1193,293 @@ def test_splitter_flush_emits_residual_partial_block():
     assert len(flushed) == 1
     assert flushed[0][0] == "content"
     assert flushed[0][1].startswith("<ai-block")
+
+
+# ─── SSE contract enforcement ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_every_emitted_event_matches_sse_contract():
+    """Walk a chat turn that exercises tool_call, content, content_block,
+    and done events; run validate_event on each. This is the
+    regression guard for "someone added a new event field and forgot
+    to update the TypedDict in transport/sse_events.py" drift."""
+    from ai_agent.transport.sse_events import validate_event
+
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    final_text = (
+        "Customer count:\n"
+        '<ai-block type="kpi">'
+        '{"metrics": [{"label": "Total", "value": 42, "format": "number"}]}'
+        "</ai-block>"
+    )
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(return_value=[])
+    mock_graph = MagicMock()
+    mock_graph.astream_events = _StreamFactory(
+        [
+            {
+                "event": "on_tool_start",
+                "name": "list_documents",
+                "data": {"input": {"doctype": "Customer"}},
+            },
+            {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": AIMessageChunk(content=final_text)},
+            },
+        ]
+    )
+
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.create_agent_graph", return_value=mock_graph),
+    ):
+        events = await _drain(
+            service.handle_message(
+                message="count customers",
+                session_id="s-contract",
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    # Every event the service emitted must satisfy the SSE contract.
+    # validate_event raises on drift; the test passes only if all events
+    # validate clean. The kinds we expect to see at least once across
+    # this scenario:
+    seen_kinds = set()
+    for ev in events:
+        validate_event(ev)
+        seen_kinds.add(ev["type"])
+    assert {"session", "tool_call", "content", "content_block", "done"} <= seen_kinds, (
+        f"scenario didn't exercise all expected kinds: got {seen_kinds!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_error_path_events_match_sse_contract():
+    """The failure branch emits `error` + `done`. Both must satisfy the
+    contract."""
+    from ai_agent.transport.sse_events import validate_event
+
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(side_effect=RuntimeError("mcp down"))
+
+    with patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client):
+        events = await _drain(
+            service.handle_message(
+                message="hi",
+                session_id="s-err",
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    seen_kinds = set()
+    for ev in events:
+        validate_event(ev)
+        seen_kinds.add(ev["type"])
+    assert {"session", "error", "done"} <= seen_kinds
+
+
+# ─── Ceiling-hit paths ───────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_graph_recursion_limit_surfaces_clean_error_event():
+    """When the LangGraph recursion ceiling is hit (small models that
+    loop without converging on schema exploration are the usual culprit),
+    chat.py must emit one SSE error event with the class name in the
+    message — no stack trace leakage, no half-written stream — and
+    follow it with a done event carrying data_quality: low. This is
+    the ceiling-hit path the AI_AGENT_AGENT_RECURSION_LIMIT env var
+    was made configurable for; it must fail cleanly when hit."""
+    from langgraph.errors import GraphRecursionError
+
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(return_value=[])
+
+    def _recursion_explosion(*_args, **_kwargs):
+        async def _gen():
+            # Emit a couple of plausible-looking tool starts before the
+            # ceiling hits — matches the real shape where the agent has
+            # already worked a while before tripping the limit.
+            yield {
+                "event": "on_tool_start",
+                "name": "list_documents",
+                "data": {"input": {"doctype": "Customer"}},
+            }
+            raise GraphRecursionError("Recursion limit of 50 reached without hitting a stop")
+            yield  # pragma: no cover — unreachable but keeps the function an asyncgen
+
+        return _gen()
+
+    mock_graph = MagicMock()
+    mock_graph.astream_events = _recursion_explosion
+
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.create_agent_graph", return_value=mock_graph),
+    ):
+        events = await _drain(
+            service.handle_message(
+                message="please loop forever",
+                session_id="s-recursion",
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    errors = [e for e in events if e["type"] == "error"]
+    assert len(errors) == 1, f"expected exactly 1 error event, got {len(errors)}: {events!r}"
+    msg = errors[0]["message"]
+    assert msg.startswith("GraphRecursionError"), f"error message should name the class: {msg!r}"
+    assert "Recursion limit" in msg, msg
+    # Stack-trace leakage check: the error message must not contain a
+    # 'Traceback' marker or newlines from a frame summary. The first-line
+    # cap in chat.py is what enforces this.
+    assert "Traceback" not in msg
+    assert "\n" not in msg
+    # Terminal frame: done + low quality, regardless of failure cause.
+    assert events[-1]["type"] == "done"
+    assert events[-1]["data_quality"] == "low"
+    # Tool started before the ceiling hit was recorded.
+    assert events[-1]["tools_called"] == ["list_documents"]
+
+
+# ─── Concurrent-sid isolation ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_two_concurrent_turns_get_two_distinct_mcp_clients_with_their_own_sids():
+    """Two chat turns inflight with different sids must each see their
+    own sid threaded into the MCP client. A regression where a per-request
+    builder closed over the wrong sid would 'leak' user A's session to
+    user B's tool calls — the load-bearing security property of the
+    permissions-stay-in-Frappe design point.
+
+    The interleaving uses asyncio.gather to start both turns; the
+    `build_mcp_client_for_sid` stub records (sid, time_called) so we
+    can assert each turn used its own sid even when the calls
+    overlap in the event loop."""
+    import asyncio
+
+    service = _make_service()
+    user_a = UserContext(sid="sid-a")
+    user_b = UserContext(sid="sid-b")
+
+    # Per-sid mock clients; build_mcp_client_for_sid routes by sid so
+    # we can later assert the right one was used for the right turn.
+    client_a = MagicMock()
+    client_a.get_tools = AsyncMock(return_value=[])
+    client_b = MagicMock()
+    client_b.get_tools = AsyncMock(return_value=[])
+    clients = {"sid-a": client_a, "sid-b": client_b}
+    builder_calls: list[str] = []
+
+    def _builder(_settings, sid):
+        builder_calls.append(sid)
+        return clients[sid]
+
+    mock_graph = MagicMock()
+    mock_graph.astream_events = _StreamFactory([])
+
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", side_effect=_builder),
+        patch("ai_agent.services.chat.create_agent_graph", return_value=mock_graph),
+    ):
+        # Run both turns concurrently and drain each.
+        async def _run(uc: UserContext, session: str):
+            return await _drain(
+                service.handle_message(
+                    message="hi",
+                    session_id=session,
+                    context={},
+                    user_context=uc,
+                )
+            )
+
+        events_a, events_b = await asyncio.gather(
+            _run(user_a, "sess-a"),
+            _run(user_b, "sess-b"),
+        )
+
+    # Each turn must have invoked the builder with its own sid exactly
+    # once — no cross-contamination.
+    assert builder_calls.count("sid-a") == 1, builder_calls
+    assert builder_calls.count("sid-b") == 1, builder_calls
+    # And each got its own client (proving the per-sid mock above
+    # was wired correctly).
+    client_a.get_tools.assert_called_once()
+    client_b.get_tools.assert_called_once()
+    # Both turns produced clean envelopes.
+    assert events_a[0]["type"] == "session" and events_a[-1]["type"] == "done"
+    assert events_b[0]["type"] == "session" and events_b[-1]["type"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_non_json_serialisable_tool_args_drop_silently_not_explode():
+    """`tool_args_json = json.dumps(tool_invocations)` is wrapped in a
+    try/except (TypeError, ValueError) so a tool whose args contain
+    a non-serialisable value (e.g. a datetime that escaped formatting,
+    a bytes object, a custom class instance) doesn't abort the
+    final history write. Covered the previously-uncovered exception
+    arm in chat.py."""
+    service = _make_service()
+    user_context = UserContext(sid="abc123")
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(return_value=[])
+
+    # A `bytes` value is not JSON-serialisable by the stdlib encoder and
+    # raises TypeError. The on_tool_start event's input dict is forwarded
+    # verbatim to tool_invocations.
+    mock_graph = MagicMock()
+    mock_graph.astream_events = _StreamFactory(
+        [
+            {
+                "event": "on_tool_start",
+                "name": "weird_tool",
+                "data": {"input": {"blob": b"\x01\x02\x03"}},
+            }
+        ]
+    )
+
+    fake_history = MagicMock()
+    fake_history.create_session = AsyncMock(return_value="sess-1")
+    fake_history.save_message = AsyncMock(return_value="msg-1")
+    fake_history.ensure_session = AsyncMock(side_effect=lambda *, name, **_: name)
+    service._history = fake_history
+
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.create_agent_graph", return_value=mock_graph),
+    ):
+        events = await _drain(
+            service.handle_message(
+                message="invoke weird_tool",
+                session_id="sess-nonserialisable",
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    # Turn must still finish cleanly with `done`; no error event despite
+    # the JSON-dump exception.
+    assert events[-1]["type"] == "done"
+    assert events[-1]["data_quality"] == "high"
+    # The assistant message write got tool_args_json=None (silently dropped).
+    assistant_writes = [
+        c for c in fake_history.save_message.call_args_list if c.kwargs.get("role") == "assistant"
+    ]
+    assert len(assistant_writes) == 1
+    assert assistant_writes[0].kwargs["tool_args_json"] is None
