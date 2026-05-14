@@ -75,16 +75,6 @@ _DEPRECATED_TOOLS = frozenset(
 )
 
 
-class _ToolsUnavailable(RuntimeError):
-    """Raised at the tool-load boundary when MCP can't serve tools.
-
-    The args carry a client-safe message. Already logged as a warning
-    at the boundary; the outer chat-turn handler must NOT re-log it as
-    an exception traceback — MCP being unreachable is a known
-    operational state, not a programming error.
-    """
-
-
 def _tools_unavailable_message(root: BaseException) -> str:
     """Map a tool-load root cause to a user-facing SSE error string.
 
@@ -230,6 +220,8 @@ class ChatService:
             try:
                 # Per-request MCP client carrying the caller's sid cookie.
                 mcp_client = build_mcp_client_for_sid(self._settings, user_context.sid)
+                tools: list[Any] = []
+                tools_unavailable_reason: str | None = None
                 with _tracer.start_as_current_span("agent.load_tools") as load_span:
                     try:
                         tools = await asyncio.wait_for(
@@ -237,28 +229,28 @@ class ChatService:
                             timeout=_MCP_TOOLS_LOAD_TIMEOUT_S,
                         )
                     except TimeoutError as exc:
+                        # Timeout deserves an explicit error event — the user
+                        # likely waited 20s and is still owed a response.
                         raise RuntimeError(
                             f"MCP tools/list timed out after {_MCP_TOOLS_LOAD_TIMEOUT_S:.0f}s"
                         ) from exc
                     except Exception as exc:
                         # MCP server unreachable / refusing the handshake /
-                        # returning errors. Unwrap ExceptionGroup (anyio
-                        # TaskGroup wraps the real cause one or more layers
-                        # deep) so the warning log records the root type
-                        # and message, not the opaque outer wrapper.
+                        # returning errors. Soft-fail: log a warning and let
+                        # the agent run with an empty tool registry. The
+                        # model can still answer conversational queries
+                        # ("hi", "what doctypes exist") and emit "I need
+                        # data tools to answer that" for data questions —
+                        # both better UX than a hard 'Tools unavailable'
+                        # that blocks every turn including the ones tools
+                        # weren't needed for.
                         root: BaseException = exc
                         while isinstance(root, BaseExceptionGroup) and root.exceptions:
                             root = root.exceptions[0]
-                        # sid_prefix (first 8 chars) lets the operator
-                        # cross-reference a failing MCP load against the
-                        # Frappe session log without exposing the full sid
-                        # in plaintext. A 401 here almost always means the
-                        # sid we forwarded was technically non-empty but
-                        # invalid/expired (the empty-sid case is caught
-                        # earlier by build_mcp_client_for_sid's ValueError).
                         sid_prefix = user_context.sid[:8] if user_context.sid else None
+                        tools_unavailable_reason = _tools_unavailable_message(root)
                         logger.warning(
-                            "chat_tools_load_failed",
+                            "chat_tools_load_failed_soft_degrade",
                             session_id=session_id,
                             sid_prefix=sid_prefix,
                             error_type=type(root).__name__,
@@ -266,7 +258,8 @@ class ChatService:
                         )
                         load_span.set_attribute("failed", True)
                         load_span.set_attribute("error_type", type(root).__name__)
-                        raise _ToolsUnavailable(_tools_unavailable_message(root)) from exc
+                        load_span.set_attribute("degraded", True)
+                        tools = []
                     load_span.set_attribute("tool_count", len(tools))
 
                 # Drop deprecated MCP tools (project-status family, kept
@@ -291,6 +284,18 @@ class ChatService:
                 # agent system message by `build_agent_messages`. The
                 # envelope schema itself is fixed in `ai_agent.blocks.envelope`.
                 context_preamble = self._build_system_prompt(context or {})
+                if tools_unavailable_reason is not None:
+                    # Soft-degraded: tell the model so it answers data
+                    # questions with a "I can't fetch that right now"
+                    # text block instead of hallucinating values.
+                    context_preamble += (
+                        "\n\n# Tool status\n\n"
+                        f"NOTE: {tools_unavailable_reason} "
+                        "Answer conversational questions normally, but for "
+                        "questions that need real data emit a text block "
+                        "explaining tools are temporarily unavailable. "
+                        "Do not fabricate data."
+                    )
                 tool_registry = ToolRegistry(tools)
 
                 # Unified agent loop. tool_call is a block type in the
@@ -320,25 +325,6 @@ class ChatService:
                             assistant_text_parts.append(ev["text"])
                         yield ev
 
-            except _ToolsUnavailable as exc:
-                # Tool-load boundary already emitted a single-line WARNING
-                # with the underlying cause; surfacing a full traceback
-                # here would double-log a known operational state. Just
-                # mark the turn failed and yield the pre-baked
-                # client-safe message. Use the underlying cause's class
-                # for error_type so the turn summary + span attrs let
-                # operators bucket by real failure mode (McpError,
-                # ConnectError, ...) instead of the internal wrapper.
-                failed = True
-                root_cause: BaseException | None = exc.__cause__
-                while isinstance(root_cause, BaseExceptionGroup) and root_cause.exceptions:
-                    root_cause = root_cause.exceptions[0]
-                error_type = (
-                    type(root_cause).__name__ if root_cause is not None else type(exc).__name__
-                )
-                turn_span.set_status(Status(StatusCode.ERROR, error_type))
-                error_message = str(exc)
-                yield {"type": "error", "message": error_message}
             except Exception as exc:
                 failed = True
                 error_type = type(exc).__name__

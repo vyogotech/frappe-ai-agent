@@ -97,10 +97,11 @@ async def test_handle_message_builds_mcp_client_with_caller_sid():
 
 
 @pytest.mark.asyncio
-async def test_handle_message_surfaces_tool_load_failure_as_tools_unavailable():
-    """Any error during MCP tool loading (other than TimeoutError) is
-    surfaced as a clean 'Tools unavailable' message. The underlying
-    cause stays in a single-line warning log — no traceback."""
+async def test_mcp_failure_soft_degrades_no_error_event():
+    """When MCP tool loading fails (other than TimeoutError), the agent
+    soft-degrades: no error event, no hard fail. The agent loop still
+    runs with an empty tool registry so conversational queries get
+    answered. The cause stays in a single-line warning log."""
     service = _make_service()
     user_context = UserContext(sid="abc123")
 
@@ -110,6 +111,7 @@ async def test_handle_message_surfaces_tool_load_failure_as_tools_unavailable():
     with (
         structlog.testing.capture_logs() as logs,
         patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.run_agent_loop", _loop_factory([])),
     ):
         events = await _drain(
             service.handle_message(
@@ -117,14 +119,15 @@ async def test_handle_message_surfaces_tool_load_failure_as_tools_unavailable():
             )
         )
 
-    error_events = [e for e in events if e["type"] == "error"]
-    assert len(error_events) == 1
-    assert "Tools unavailable" in error_events[0]["message"]
-    assert "RuntimeError" not in error_events[0]["message"]
+    # No error event — the agent ran the loop with empty tools.
+    assert [e for e in events if e["type"] == "error"] == []
+    # Stream still terminates with done; data_quality stays high because
+    # no exception bubbled (the agent answered, just without data tools).
     assert events[-1]["type"] == "done"
-    assert events[-1]["data_quality"] == "low"
+    assert events[-1]["data_quality"] == "high"
 
-    warns = [e for e in logs if e["event"] == "chat_tools_load_failed"]
+    # Warning log captures the cause for the operator.
+    warns = [e for e in logs if e["event"] == "chat_tools_load_failed_soft_degrade"]
     assert len(warns) == 1
     assert warns[0]["log_level"] == "warning"
     assert warns[0]["error_type"] == "RuntimeError"
@@ -133,7 +136,7 @@ async def test_handle_message_surfaces_tool_load_failure_as_tools_unavailable():
 
 
 @pytest.mark.asyncio
-async def test_tool_load_warning_unwraps_exception_group_to_root_cause():
+async def test_mcp_soft_degrade_warning_unwraps_exception_group_root_cause():
     """anyio's TaskGroup wraps the real MCP error in BaseExceptionGroup
     one or more layers deep. The warning log must surface the root cause."""
     service = _make_service()
@@ -148,6 +151,7 @@ async def test_tool_load_warning_unwraps_exception_group_to_root_cause():
     with (
         structlog.testing.capture_logs() as logs,
         patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.run_agent_loop", _loop_factory([])),
     ):
         await _drain(
             service.handle_message(
@@ -155,7 +159,7 @@ async def test_tool_load_warning_unwraps_exception_group_to_root_cause():
             )
         )
 
-    warns = [e for e in logs if e["event"] == "chat_tools_load_failed"]
+    warns = [e for e in logs if e["event"] == "chat_tools_load_failed_soft_degrade"]
     assert len(warns) == 1
     assert warns[0]["error_type"] == "RuntimeError"
     assert warns[0]["error"] == "Session terminated"
@@ -173,28 +177,36 @@ def _http_status_error(status: int) -> httpx.HTTPStatusError:
 
 @pytest.mark.parametrize("status", [401, 403])
 @pytest.mark.asyncio
-async def test_tool_load_auth_rejection_yields_authentication_message(status):
+async def test_mcp_auth_rejection_soft_degrades_with_log(status):
+    """401/403 from MCP is treated the same as any transport failure
+    under soft-degrade — the agent still answers. The operator sees
+    the auth-specific reason in the warning log."""
     service = _make_service()
     user_context = UserContext(sid="abc123")
 
     mock_client = MagicMock()
     mock_client.get_tools = AsyncMock(side_effect=_http_status_error(status))
 
-    with patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client):
+    with (
+        structlog.testing.capture_logs() as logs,
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.run_agent_loop", _loop_factory([])),
+    ):
         events = await _drain(
             service.handle_message(
                 message="hi", session_id="s-auth", context={}, user_context=user_context
             )
         )
 
-    error_events = [e for e in events if e["type"] == "error"]
-    assert len(error_events) == 1
-    assert "authentication failed" in error_events[0]["message"]
-    assert "cannot reach" not in error_events[0]["message"]
+    assert [e for e in events if e["type"] == "error"] == []
+    assert events[-1]["type"] == "done"
+    warns = [e for e in logs if e["event"] == "chat_tools_load_failed_soft_degrade"]
+    assert len(warns) == 1
+    assert warns[0]["error_type"] == "HTTPStatusError"
 
 
 @pytest.mark.asyncio
-async def test_tool_load_transport_error_yields_unreachable_message():
+async def test_mcp_transport_error_soft_degrades():
     service = _make_service()
     user_context = UserContext(sid="abc123")
 
@@ -203,36 +215,48 @@ async def test_tool_load_transport_error_yields_unreachable_message():
         side_effect=httpx.ConnectError("All connection attempts failed")
     )
 
-    with patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client):
+    with (
+        structlog.testing.capture_logs() as logs,
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.run_agent_loop", _loop_factory([])),
+    ):
         events = await _drain(
             service.handle_message(
                 message="hi", session_id="s-conn", context={}, user_context=user_context
             )
         )
 
-    error_events = [e for e in events if e["type"] == "error"]
-    assert len(error_events) == 1
-    assert "cannot reach" in error_events[0]["message"]
+    assert [e for e in events if e["type"] == "error"] == []
+    assert events[-1]["type"] == "done"
+    warns = [e for e in logs if e["event"] == "chat_tools_load_failed_soft_degrade"]
+    assert len(warns) == 1
+    assert warns[0]["error_type"] == "ConnectError"
 
 
 @pytest.mark.asyncio
-async def test_tool_load_unknown_http_status_yields_status_code_in_message():
+async def test_mcp_unknown_http_status_soft_degrades():
     service = _make_service()
     user_context = UserContext(sid="abc123")
 
     mock_client = MagicMock()
     mock_client.get_tools = AsyncMock(side_effect=_http_status_error(500))
 
-    with patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client):
+    with (
+        structlog.testing.capture_logs() as logs,
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.run_agent_loop", _loop_factory([])),
+    ):
         events = await _drain(
             service.handle_message(
                 message="hi", session_id="s-500", context={}, user_context=user_context
             )
         )
 
-    error_events = [e for e in events if e["type"] == "error"]
-    assert len(error_events) == 1
-    assert "HTTP 500" in error_events[0]["message"]
+    assert [e for e in events if e["type"] == "error"] == []
+    assert events[-1]["type"] == "done"
+    warns = [e for e in logs if e["event"] == "chat_tools_load_failed_soft_degrade"]
+    assert len(warns) == 1
+    assert warns[0]["error_type"] == "HTTPStatusError"
 
 
 @pytest.mark.asyncio
@@ -607,14 +631,26 @@ async def test_handle_message_emits_turn_summary_log_on_success():
 
 @pytest.mark.asyncio
 async def test_handle_message_emits_turn_summary_log_on_failure():
+    """A real exception (not MCP soft-degrade) bubbles to the outer
+    handler and marks the turn failed. We trigger it via a Frappe
+    history failure that wraps through `_make_service`'s default
+    client (which can't reach Frappe in tests)."""
     service = _make_service()
     user_context = UserContext(sid="abc123")
 
     mock_client = MagicMock()
-    mock_client.get_tools = AsyncMock(side_effect=RuntimeError("mcp down"))
+    mock_client.get_tools = AsyncMock(return_value=[])
+
+    def _raising_loop(**_kwargs):
+        async def _gen():
+            raise RuntimeError("loop blew up")
+            yield  # unreachable
+
+        return _gen()
 
     with (
         patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.run_agent_loop", _raising_loop),
         structlog.testing.capture_logs() as logs,
     ):
         await _drain(
@@ -732,13 +768,26 @@ async def test_handle_message_emits_load_tools_and_run_spans(otel_spans):
 
 @pytest.mark.asyncio
 async def test_handle_message_failure_marks_chat_turn_span_error(otel_spans):
+    """A real exception (e.g. from the agent loop) marks the chat_turn
+    span ERROR. MCP failures alone soft-degrade and do NOT mark the
+    span error (the turn succeeded with limited tools)."""
     service = _make_service()
     user_context = UserContext(sid="abc123")
 
     mock_client = MagicMock()
-    mock_client.get_tools = AsyncMock(side_effect=RuntimeError("mcp down"))
+    mock_client.get_tools = AsyncMock(return_value=[])
 
-    with patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client):
+    def _raising_loop(**_kwargs):
+        async def _gen():
+            raise RuntimeError("loop blew up")
+            yield  # unreachable
+
+        return _gen()
+
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.run_agent_loop", _raising_loop),
+    ):
         await _drain(
             service.handle_message(
                 message="hi", session_id="s-fail", context={}, user_context=user_context
@@ -799,14 +848,26 @@ async def test_every_emitted_event_matches_sse_contract():
 
 @pytest.mark.asyncio
 async def test_error_path_events_match_sse_contract():
+    """The hard-failure branch (real exception during agent loop) emits
+    `error` + `done`. Both must satisfy the contract."""
     from ai_agent.transport.sse_events import validate_event
 
     service = _make_service()
     user_context = UserContext(sid="abc123")
     mock_client = MagicMock()
-    mock_client.get_tools = AsyncMock(side_effect=RuntimeError("mcp down"))
+    mock_client.get_tools = AsyncMock(return_value=[])
 
-    with patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client):
+    def _raising_loop(**_kwargs):
+        async def _gen():
+            raise RuntimeError("loop blew up")
+            yield  # unreachable
+
+        return _gen()
+
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.run_agent_loop", _raising_loop),
+    ):
         events = await _drain(
             service.handle_message(
                 message="hi", session_id="s-err", context={}, user_context=user_context
