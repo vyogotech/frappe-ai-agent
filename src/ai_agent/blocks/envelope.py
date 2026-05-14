@@ -199,7 +199,19 @@ _STATUS_LIST_PAYLOAD: dict = {
 # schema-to-GBNF grammar) enforces per-type payload shape at every token. This
 # is what stops small models from echoing JSON-schema-like nested objects into
 # payloads (a real failure mode on smollm2:1.7b at A5 in the prior baseline).
+#
+# `title` and `description` are required when this schema is routed through
+# providers that map structured output → function calling (langchain-openai
+# does this for the `openai` provider, including when pointed at Ollama's
+# OpenAI-compat layer). The values become the function name / description.
+# Ollama's native grammar generator treats both as metadata and ignores them.
 BLOCK_ENVELOPE_SCHEMA: dict = {
+    "title": "BlockEnvelope",
+    "description": (
+        "A JSON envelope of one or more rendered blocks. Each block is one of: "
+        "text, table, chart, kpi, status_list, or tool_call (for invoking a "
+        "tool to fetch data before composing the answer)."
+    ),
     "type": "object",
     "properties": {
         "blocks": {
