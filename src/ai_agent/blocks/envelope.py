@@ -22,8 +22,18 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterator
+from typing import Any
 
-__all__ = ["BLOCK_ENVELOPE_SCHEMA", "envelope_to_markup"]
+from langchain_core.messages import HumanMessage, SystemMessage
+
+__all__ = [
+    "BLOCK_ENVELOPE_SCHEMA",
+    "ENVELOPE_FORMATTER_SYSTEM_PROMPT",
+    "build_formatter_messages",
+    "envelope_to_markup",
+    "iter_complete_blocks",
+]
 
 
 _TEXT_PAYLOAD: dict = {
@@ -281,3 +291,149 @@ def envelope_to_markup(raw: str) -> str:
         json_payload = json.dumps(payload, ensure_ascii=False)
         parts.append(f'<ai-block type="{btype}">\n{json_payload}\n</ai-block>')
     return "\n\n".join(parts)
+
+
+# --------------------------------------------------------------------------- #
+# Pass-2 (envelope formatter) prompt + message builder
+# --------------------------------------------------------------------------- #
+
+ENVELOPE_FORMATTER_SYSTEM_PROMPT = """\
+You are a FORMATTER. Take the AGENT DRAFT (the model's free-form answer
+from the agent loop) and the TOOL RESULTS (data the agent fetched) and
+emit one JSON object matching this envelope:
+
+{"blocks":[{"type":"text|table|chart|kpi|status_list","payload":{...}}, ...]}
+
+Emit only that JSON object — no prose around it, no markdown fence.
+
+## Payload by type
+
+text:
+  {"content":"narrative markdown"}
+
+kpi:
+  {"metrics":[
+    {"label","value","format":"currency|number|percent|text",
+     "trend":"up|down|flat","trend_value"}
+  ]}
+
+table:
+  {"title","columns":[
+    {"key","label","format":"text|currency|number|percent|date"}
+  ],"rows":[
+    {"values":{"<key>":<value>},"route":{"doctype","name"}}
+  ]}
+
+chart:
+  {"chart_type":"bar|line|pie|funnel|heatmap|calendar","title",
+   "data":{"labels":["..."],
+           "datasets":[{"name","values":[1,2,3]}]},
+   "options":{"format":"number|currency|percent"}}
+
+status_list:
+  {"title","items":[
+    {"label","status","color":"green|red|yellow|blue|gray",
+     "route":{"doctype","name"}}
+  ]}
+
+## How to choose blocks
+
+- 3+ rows or 2+ columns of tabular data → table.
+- A trend or comparison across labels → chart.
+- One or a few headline numbers → kpi.
+- A small list of items with state/status → status_list.
+- Conversational answer or a "no data" message → text.
+- Multi-block answers (e.g., narrative + table) emit each piece in
+  display order.
+
+Numbers in currency-formatted cells are RAW (the frontend formats them).
+For chart datasets, `values` length MUST equal `labels` length; use null
+for missing points."""
+
+
+def build_formatter_messages(
+    *,
+    user_message: str,
+    tool_results: list[dict[str, Any]],
+    draft: str,
+    system_prompt: str = ENVELOPE_FORMATTER_SYSTEM_PROMPT,
+) -> list[SystemMessage | HumanMessage]:
+    """Compose the messages for the Pass-2 envelope formatter call.
+
+    `tool_results` is a list of `{"name","args","result"}` dicts captured
+    from `on_tool_end` events during the Pass-1 graph run. `draft` is the
+    Pass-1 model's free-form final message (its text was suppressed from
+    user-visible streaming and accumulated here).
+    """
+    if tool_results:
+        tool_log = "\n".join(
+            f"- {tr.get('name', '?')}({json.dumps(tr.get('args') or {}, ensure_ascii=False)})"
+            f" → {_truncate(str(tr.get('result') or ''), 2000)}"
+            for tr in tool_results
+        )
+    else:
+        tool_log = "(no tools called)"
+
+    body = (
+        f"USER ASKED:\n{user_message}\n\n"
+        f"TOOL RESULTS:\n{tool_log}\n\n"
+        f"AGENT DRAFT:\n{draft or '(empty)'}"
+    )
+    return [SystemMessage(content=system_prompt), HumanMessage(content=body)]
+
+
+def _truncate(s: str, max_len: int) -> str:
+    if len(s) <= max_len:
+        return s
+    return s[:max_len] + "…(truncated)"
+
+
+# --------------------------------------------------------------------------- #
+# Streaming: detect newly-completed blocks across partial-dict yields
+# --------------------------------------------------------------------------- #
+
+
+def iter_complete_blocks(
+    partial: dict[str, Any] | None,
+    state: dict[str, Any],
+    *,
+    final: bool = False,
+) -> Iterator[dict[str, Any]]:
+    """Yield block dicts that have JUST completed in `partial`.
+
+    The `with_structured_output().astream()` API emits a dict snapshot on
+    every token. We want to detect when a particular block index has
+    transitioned from "still streaming" to "definitely closed" so we can
+    translate it to ai-block markup and emit a content_block event.
+
+    The reliable signal is "the NEXT block has started" (or it's the
+    final yield). At that point the closing brace of the current block
+    has arrived; partial-JSON parsing for numbers (digit-by-digit) is
+    only known-done when followed by a structural token.
+
+    `state` is a mutable dict the caller passes across yields. It tracks
+    which indices have been emitted so we don't re-yield.
+    """
+    state.setdefault("emitted", set())
+    if not isinstance(partial, dict):
+        return
+    blocks = partial.get("blocks")
+    if not isinstance(blocks, list):
+        return
+    n = len(blocks)
+    for i, b in enumerate(blocks):
+        if i in state["emitted"]:
+            continue
+        # Block at index i is "done" when:
+        # - a later block (i+1, etc.) has started in the partial — its
+        #   closing brace must have arrived for the next object to open,
+        # - OR we're at the final yield (entire envelope closed).
+        next_started = i < n - 1
+        if not (next_started or final):
+            continue
+        if not isinstance(b, dict) or "type" not in b or "payload" not in b:
+            # Malformed block — skip but mark emitted so we don't loop.
+            state["emitted"].add(i)
+            continue
+        state["emitted"].add(i)
+        yield b

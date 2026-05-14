@@ -25,10 +25,34 @@ def _make_settings() -> Settings:
     )
 
 
-def _make_service() -> ChatService:
+def _make_llm(formatter_yields: list[dict[str, Any]] | None = None) -> MagicMock:
+    """Build an LLM mock that supports `.with_structured_output(...).astream(...)`.
+
+    `formatter_yields` is the list of partial-dict snapshots the Pass-2
+    formatter should emit. Default `[]` means Pass 2 produces no envelope
+    blocks — useful for tests that only care about Pass-1 / tool-call /
+    session / error behaviour.
+    """
+    llm = MagicMock()
+    yields = list(formatter_yields or [])
+
+    def _astream(_messages):
+        async def _gen():
+            for y in yields:
+                yield y
+
+        return _gen()
+
+    formatter = MagicMock()
+    formatter.astream = _astream
+    llm.with_structured_output.return_value = formatter
+    return llm
+
+
+def _make_service(llm: Any | None = None) -> ChatService:
     return ChatService(
         settings=_make_settings(),
-        llm=MagicMock(),
+        llm=llm if llm is not None else _make_llm(),
         checkpointer=MagicMock(),
         system_prompt_builder=lambda _ctx: "you are helpful",
     )
@@ -233,28 +257,20 @@ async def test_handle_message_translates_tool_start_to_tool_call_event():
 
 
 @pytest.mark.asyncio
-async def test_handle_message_translates_final_llm_message_to_content_event():
-    service = _make_service()
+async def test_pass2_text_block_becomes_content_event():
+    """The envelope formatter pass emits a `text` block — the service
+    translates it to a single `content` event (matches the wire protocol
+    where prose is `content`, not a content_block of type text)."""
+    llm = _make_llm(
+        formatter_yields=[{"blocks": [{"type": "text", "payload": {"content": "hello there"}}]}]
+    )
+    service = _make_service(llm=llm)
     user_context = UserContext(sid="abc123")
 
     mock_client = MagicMock()
     mock_client.get_tools = AsyncMock(return_value=[])
-
-    # Token-by-token streaming via on_chat_model_stream — concatenated, the
-    # chunks form the final assistant message ("hello there").
     mock_graph = MagicMock()
-    mock_graph.astream_events = _StreamFactory(
-        [
-            {
-                "event": "on_chat_model_stream",
-                "data": {"chunk": AIMessageChunk(content="hello ")},
-            },
-            {
-                "event": "on_chat_model_stream",
-                "data": {"chunk": AIMessageChunk(content="there")},
-            },
-        ]
-    )
+    mock_graph.astream_events = _StreamFactory([])
 
     with (
         patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
@@ -270,23 +286,61 @@ async def test_handle_message_translates_final_llm_message_to_content_event():
         )
 
     content_events = [e for e in events if e["type"] == "content"]
-    # One event per streamed chunk; concatenated they form the final reply.
-    assert len(content_events) == 2
-    assert "".join(e["text"] for e in content_events) == "hello there"
+    assert len(content_events) == 1
+    assert content_events[0]["text"] == "hello there"
+
+
+@pytest.mark.asyncio
+async def test_pass1_text_stream_is_suppressed():
+    """Pass-1 `on_chat_model_stream` chunks must NOT reach the FE as
+    content events — they are captured as the formatter's draft input
+    only. The user-visible content comes from the envelope pass."""
+    service = _make_service()  # default formatter yields nothing
+    user_context = UserContext(sid="abc123")
+
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(return_value=[])
+    mock_graph = MagicMock()
+    mock_graph.astream_events = _StreamFactory(
+        [
+            {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": AIMessageChunk(content="leak ")},
+            },
+            {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": AIMessageChunk(content="me")},
+            },
+        ]
+    )
+
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.create_agent_graph", return_value=mock_graph),
+    ):
+        events = await _drain(
+            service.handle_message(
+                message="hi",
+                session_id="s-suppress",
+                context={},
+                user_context=user_context,
+            )
+        )
+
+    assert [e for e in events if e["type"] == "content"] == []
 
 
 @pytest.mark.asyncio
 async def test_handle_message_ignores_ai_message_with_tool_calls():
-    """Intermediate AI messages that only carry tool_calls should not surface as content."""
+    """Intermediate AI messages that only carry tool_calls should not
+    surface as content (or as draft text — they're the model's
+    invocation, not its answer)."""
     service = _make_service()
     user_context = UserContext(sid="abc123")
 
     mock_client = MagicMock()
     mock_client.get_tools = AsyncMock(return_value=[])
 
-    # The streaming counterpart to AIMessage.tool_calls is
-    # AIMessageChunk.tool_call_chunks; chunks of a tool-calling step carry
-    # this and must not surface as user-visible content.
     intermediate = AIMessageChunk(
         content="",
         tool_call_chunks=[{"id": "1", "name": "list_documents", "args": "{}", "index": 0}],
@@ -685,37 +739,56 @@ async def test_handle_message_continues_when_history_writes_fail():
 
 
 @pytest.mark.asyncio
-async def test_content_with_ai_block_emits_content_block_events():
-    """When the LLM's final message contains <ai-block> tags, the
-    service must emit one content_block event per block (including text
-    blocks for prose between tags), preserving order. A plain `content`
-    event is NOT emitted in this case."""
-    service = _make_service()
-    user_context = UserContext(sid="abc123")
-
-    final_text = (
-        "Here are the users:\n"
-        '<ai-block type="table">'
-        '{"title": "Users", "columns": [{"key": "name", "label": "Name"}], '
-        '"rows": [{"values": {"name": "Admin"}}]}'
-        "</ai-block>\n"
-        "That's 1 user."
+async def test_envelope_text_then_table_emits_content_then_content_block():
+    """A multi-block envelope (text + table) becomes one content event
+    (for the prose) and one content_block event (for the table), in
+    order. The text block at index 0 emits when the table block at
+    index 1 starts in the partial dict — `iter_complete_blocks`'
+    next-block-started signal."""
+    llm = _make_llm(
+        formatter_yields=[
+            # First yield: just the text block (table not started — text
+            # waits because no next-block signal yet).
+            {"blocks": [{"type": "text", "payload": {"content": "Here are the users:"}}]},
+            # Second yield: table block has started → text block emits.
+            # Table itself still waits (it's the last block in this yield).
+            {
+                "blocks": [
+                    {"type": "text", "payload": {"content": "Here are the users:"}},
+                    {
+                        "type": "table",
+                        "payload": {
+                            "title": "Users",
+                            "columns": [{"key": "name", "label": "Name"}],
+                            "rows": [{"values": {"name": "Admin"}}],
+                        },
+                    },
+                ]
+            },
+            # Final yield (same shape) — flushes the last block via
+            # iter_complete_blocks(final=True) inside _run_envelope_formatter.
+            {
+                "blocks": [
+                    {"type": "text", "payload": {"content": "Here are the users:"}},
+                    {
+                        "type": "table",
+                        "payload": {
+                            "title": "Users",
+                            "columns": [{"key": "name", "label": "Name"}],
+                            "rows": [{"values": {"name": "Admin"}}],
+                        },
+                    },
+                ]
+            },
+        ]
     )
+    service = _make_service(llm=llm)
+    user_context = UserContext(sid="abc123")
 
     mock_client = MagicMock()
     mock_client.get_tools = AsyncMock(return_value=[])
-    # In real streaming the model emits many small chunks; for this test
-    # we deliver the entire <ai-block>-tagged response as one chunk so
-    # block parsing has the full text in a single content event.
     mock_graph = MagicMock()
-    mock_graph.astream_events = _StreamFactory(
-        [
-            {
-                "event": "on_chat_model_stream",
-                "data": {"chunk": AIMessageChunk(content=final_text)},
-            }
-        ]
-    )
+    mock_graph.astream_events = _StreamFactory([])
 
     fake_history = MagicMock()
     fake_history.create_session = AsyncMock(return_value="sess-1")
@@ -736,22 +809,20 @@ async def test_content_with_ai_block_emits_content_block_events():
             )
         )
 
-    # With the BlockStreamSplitter, prose around the block streams as
-    # content events; only the structured `<ai-block>` becomes a
-    # content_block. The FE renders prose (via markdown) above the block.
     content_events = [e for e in events if e["type"] == "content"]
     block_events = [e for e in events if e["type"] == "content_block"]
 
+    assert len(content_events) == 1
+    assert content_events[0]["text"] == "Here are the users:"
     assert len(block_events) == 1
     assert block_events[0]["block"]["type"] == "table"
     assert block_events[0]["block"]["title"] == "Users"
 
-    # Prose-before and prose-after the block both arrive as content.
-    streamed_text = "".join(e["text"] for e in content_events)
-    assert "Here are the users:" in streamed_text
-    assert "That's 1 user." in streamed_text
+    # Order across the whole stream: content arrives before content_block.
+    content_idx = next(i for i, e in enumerate(events) if e["type"] == "content")
+    block_idx = next(i for i, e in enumerate(events) if e["type"] == "content_block")
+    assert content_idx < block_idx
 
-    # Stream still terminates with done
     assert events[-1]["type"] == "done"
 
 
@@ -829,25 +900,21 @@ async def test_session_event_echoes_existing_session_id():
 
 
 @pytest.mark.asyncio
-async def test_content_without_blocks_keeps_single_content_event():
-    """Plain-text responses (no <ai-block> tags) still emit exactly
-    one `content` event — block parsing is opt-in by the LLM's output."""
-    service = _make_service()
+async def test_envelope_text_only_response_yields_one_content_event():
+    """Conversational answers come back as a single-block envelope
+    `{type:"text"}` — one content event, zero content_block events."""
+    llm = _make_llm(
+        formatter_yields=[
+            {"blocks": [{"type": "text", "payload": {"content": "Hello! How can I help?"}}]}
+        ]
+    )
+    service = _make_service(llm=llm)
     user_context = UserContext(sid="abc123")
 
     mock_client = MagicMock()
     mock_client.get_tools = AsyncMock(return_value=[])
-    # Single-chunk stream — the whole reply arrives in one chunk, so we
-    # get exactly one content event (matches the test's assertion below).
     mock_graph = MagicMock()
-    mock_graph.astream_events = _StreamFactory(
-        [
-            {
-                "event": "on_chat_model_stream",
-                "data": {"chunk": AIMessageChunk(content="Hello! How can I help?")},
-            }
-        ]
-    )
+    mock_graph.astream_events = _StreamFactory([])
 
     fake_history = MagicMock()
     fake_history.create_session = AsyncMock(return_value="sess-1")
@@ -908,11 +975,10 @@ async def test_handle_message_surfaces_mcp_tools_timeout_as_error_event():
 @pytest.mark.asyncio
 async def test_handle_message_aclose_mid_stream_does_not_raise():
     """Starlette calls aclose() on the SSE generator when the client
-    disconnects. If the generator is suspended at a yield while the
-    splitter buffer is non-empty (partial open-tag suffix held back, or
-    mid-block), aclose() must NOT raise. Yielding from a `finally` clause
-    during generator cleanup raises RuntimeError("async generator ignored
-    GeneratorExit") — the implementation must avoid that pattern."""
+    disconnects. The generator must not raise on cleanup — yielding from
+    a `finally` clause during generator cleanup raises
+    RuntimeError("async generator ignored GeneratorExit"), so the
+    implementation must not use that pattern."""
     import asyncio as _asyncio
 
     service = _make_service()
@@ -928,13 +994,10 @@ async def test_handle_message_aclose_mid_stream_does_not_raise():
     mock_client.get_tools = AsyncMock(return_value=[])
 
     async def _stream(*_a, **_k):
-        # "hello " is safe prose; "<ai-bl" is held back as a possible
-        # partial open tag. After this chunk the generator yields
-        # ("content", "hello ") and suspends at that yield with the
-        # splitter buffer holding "<ai-bl".
         yield {
-            "event": "on_chat_model_stream",
-            "data": {"chunk": AIMessageChunk(content="hello <ai-bl")},
+            "event": "on_tool_start",
+            "name": "list_documents",
+            "data": {"input": {"doctype": "Customer"}},
         }
         await _asyncio.sleep(60)  # never reached — consumer drops first
 
@@ -951,12 +1014,12 @@ async def test_handle_message_aclose_mid_stream_does_not_raise():
             context={},
             user_context=user_context,
         )
-        # Drive past session and into the suspended-at-yield state.
+        # Drive past session and the first tool_call event.
         ev1 = await agen.__anext__()
         assert ev1["type"] == "session"
         ev2 = await agen.__anext__()
-        assert ev2 == {"type": "content", "text": "hello "}
-        # Splitter buffer now holds "<ai-bl". Simulate client disconnect.
+        assert ev2["type"] == "tool_call"
+        # Suspended in the middle of Pass-1; simulate client disconnect.
         try:
             await agen.aclose()
         except RuntimeError as e:  # pragma: no cover — only fires on regression
@@ -964,10 +1027,11 @@ async def test_handle_message_aclose_mid_stream_does_not_raise():
 
 
 @pytest.mark.asyncio
-async def test_handle_message_flushes_splitter_when_stream_raises_mid_block():
-    """If the graph stream raises while the splitter is buffering partial
-    block markup, the buffered text must still reach the FE (as content)
-    before the error event — flush is in a finally for this reason."""
+async def test_handle_message_pass1_exception_surfaces_as_error_event():
+    """If the Pass-1 graph stream raises, the failure surfaces as an
+    `error` event followed by `done` with data_quality=low. No content
+    was emitted (Pass-1 prose is captured-not-streamed), so there's
+    nothing to flush; the contract is still error+done."""
     service = _make_service()
     user_context = UserContext(sid="abc123")
 
@@ -976,11 +1040,9 @@ async def test_handle_message_flushes_splitter_when_stream_raises_mid_block():
 
     def _raising_stream(*_args, **_kwargs):
         async def _gen():
-            # Drive the splitter into in_block state with a partial tag,
-            # then raise mid-stream.
             yield {
                 "event": "on_chat_model_stream",
-                "data": {"chunk": AIMessageChunk(content='<ai-block type="kpi">{partial')},
+                "data": {"chunk": AIMessageChunk(content="draft start")},
             }
             raise RuntimeError("stream blew up")
 
@@ -1002,14 +1064,13 @@ async def test_handle_message_flushes_splitter_when_stream_raises_mid_block():
             )
         )
 
-    content_texts = [e["text"] for e in events if e["type"] == "content"]
-    assert any("<ai-block" in t for t in content_texts), (
-        "splitter buffer was dropped on exception path"
-    )
     error_events = [e for e in events if e["type"] == "error"]
     assert len(error_events) == 1
     assert "stream blew up" in error_events[0]["message"]
     assert events[-1]["type"] == "done"
+    assert events[-1]["data_quality"] == "low"
+    # No content events were emitted — Pass-1 prose is suppressed.
+    assert [e for e in events if e["type"] == "content"] == []
 
 
 # ─── Turn-summary structured log ──────────────────────────────────────────
@@ -1023,7 +1084,10 @@ async def test_handle_message_emits_turn_summary_log_on_success():
     single audit-trail entry an operator can grep for to answer
     'what happened on /api/v1/chat for this user' without reading
     three different log streams."""
-    service = _make_service()
+    llm = _make_llm(
+        formatter_yields=[{"blocks": [{"type": "text", "payload": {"content": "hello there"}}]}]
+    )
+    service = _make_service(llm=llm)
     user_context = UserContext(sid="abc123")
 
     mock_client = MagicMock()
@@ -1036,10 +1100,6 @@ async def test_handle_message_emits_turn_summary_log_on_success():
                 "event": "on_tool_start",
                 "name": "list_documents",
                 "data": {"input": {"doctype": "Customer"}},
-            },
-            {
-                "event": "on_chat_model_stream",
-                "data": {"chunk": AIMessageChunk(content="hello there")},
             },
         ]
     )
@@ -1111,27 +1171,25 @@ async def test_handle_message_turn_summary_counts_block_events():
     """When the LLM emits an <ai-block>, the summary records it. This
     is the signal an operator uses to ask 'are users actually seeing
     structured blocks or just prose?' over a population of turns."""
-    service = _make_service()
-    user_context = UserContext(sid="abc123")
-
-    final_text = (
-        "Here:\n"
-        '<ai-block type="kpi">'
-        '{"metrics": [{"label": "Rev", "value": 1, "format": "number"}]}'
-        "</ai-block>"
+    llm = _make_llm(
+        formatter_yields=[
+            {
+                "blocks": [
+                    {
+                        "type": "kpi",
+                        "payload": {"metrics": [{"label": "Rev", "value": 1, "format": "number"}]},
+                    }
+                ]
+            }
+        ]
     )
+    service = _make_service(llm=llm)
+    user_context = UserContext(sid="abc123")
 
     mock_client = MagicMock()
     mock_client.get_tools = AsyncMock(return_value=[])
     mock_graph = MagicMock()
-    mock_graph.astream_events = _StreamFactory(
-        [
-            {
-                "event": "on_chat_model_stream",
-                "data": {"chunk": AIMessageChunk(content=final_text)},
-            }
-        ]
-    )
+    mock_graph.astream_events = _StreamFactory([])
 
     with (
         patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
@@ -1163,7 +1221,10 @@ async def test_handle_message_emits_chat_turn_span(otel_spans):
     session id, the tools-called count, the content-chars count, and
     failed=False on the happy path. This is the single span an operator
     follows in a trace UI to answer 'where did those 18 seconds go?'"""
-    service = _make_service()
+    llm = _make_llm(
+        formatter_yields=[{"blocks": [{"type": "text", "payload": {"content": "reply"}}]}]
+    )
+    service = _make_service(llm=llm)
     user_context = UserContext(sid="abc123")
 
     mock_client = MagicMock()
@@ -1176,10 +1237,6 @@ async def test_handle_message_emits_chat_turn_span(otel_spans):
                 "event": "on_tool_start",
                 "name": "list_documents",
                 "data": {"input": {"doctype": "Customer"}},
-            },
-            {
-                "event": "on_chat_model_stream",
-                "data": {"chunk": AIMessageChunk(content="reply")},
             },
         ]
     )
@@ -1356,15 +1413,31 @@ async def test_every_emitted_event_matches_sse_contract():
     to update the TypedDict in transport/sse_events.py" drift."""
     from ai_agent.transport.sse_events import validate_event
 
-    service = _make_service()
-    user_context = UserContext(sid="abc123")
-
-    final_text = (
-        "Customer count:\n"
-        '<ai-block type="kpi">'
-        '{"metrics": [{"label": "Total", "value": 42, "format": "number"}]}'
-        "</ai-block>"
+    # Envelope yields text + kpi blocks so the formatter pass produces
+    # both a content event (for the text block) and a content_block
+    # event (for the kpi block) — exercising all five SSE kinds across
+    # the full turn.
+    llm = _make_llm(
+        formatter_yields=[
+            # First yield: text block only — text needs a next-block signal,
+            # so it doesn't emit yet.
+            {"blocks": [{"type": "text", "payload": {"content": "Customer count:"}}]},
+            # Second yield: kpi started → text emits as content.
+            {
+                "blocks": [
+                    {"type": "text", "payload": {"content": "Customer count:"}},
+                    {
+                        "type": "kpi",
+                        "payload": {
+                            "metrics": [{"label": "Total", "value": 42, "format": "number"}]
+                        },
+                    },
+                ]
+            },
+        ]
     )
+    service = _make_service(llm=llm)
+    user_context = UserContext(sid="abc123")
 
     mock_client = MagicMock()
     mock_client.get_tools = AsyncMock(return_value=[])
@@ -1375,10 +1448,6 @@ async def test_every_emitted_event_matches_sse_contract():
                 "event": "on_tool_start",
                 "name": "list_documents",
                 "data": {"input": {"doctype": "Customer"}},
-            },
-            {
-                "event": "on_chat_model_stream",
-                "data": {"chunk": AIMessageChunk(content=final_text)},
             },
         ]
     )
@@ -1397,9 +1466,6 @@ async def test_every_emitted_event_matches_sse_contract():
         )
 
     # Every event the service emitted must satisfy the SSE contract.
-    # validate_event raises on drift; the test passes only if all events
-    # validate clean. The kinds we expect to see at least once across
-    # this scenario:
     seen_kinds = set()
     for ev in events:
         validate_event(ev)

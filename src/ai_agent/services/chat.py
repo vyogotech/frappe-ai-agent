@@ -37,6 +37,12 @@ from opentelemetry.trace import Status, StatusCode
 from ai_agent.agent.graph import create_agent_graph
 from ai_agent.agent.prompts import build_system_prompt
 from ai_agent.agent.tool_errors import install_tool_error_handler
+from ai_agent.blocks.envelope import (
+    BLOCK_ENVELOPE_SCHEMA,
+    build_formatter_messages,
+    envelope_to_markup,
+    iter_complete_blocks,
+)
 from ai_agent.blocks.parser import parse_blocks
 from ai_agent.config import Settings
 from ai_agent.integrations.frappe_history import FrappeHistoryClient
@@ -173,6 +179,31 @@ class _BlockStreamSplitter:
             self._in_block = False
 
 
+def _events_from_envelope_block(block: dict[str, Any]) -> list[dict[str, Any]]:
+    """Translate one completed envelope block into SSE-schema events.
+
+    Single source of truth for "envelope block dict → wire-protocol
+    events". Text blocks become content events; structured blocks go
+    through the spec's `parse_blocks` to validate against the pydantic
+    models before becoming content_block events. Unknown / malformed
+    blocks (which the schema's `oneOf` should make unreachable, but be
+    defensive) are silently dropped.
+    """
+    try:
+        markup = envelope_to_markup(json.dumps({"blocks": [block]}, ensure_ascii=False))
+    except (ValueError, TypeError):
+        return []
+    if not markup:
+        return []
+    events: list[dict[str, Any]] = []
+    for parsed in parse_blocks(markup):
+        if parsed.type == "text":
+            events.append({"type": "content", "text": parsed.content})
+        else:
+            events.append({"type": "content_block", "block": parsed.model_dump()})
+    return events
+
+
 def _utcnow_rfc3339_z() -> str:
     """RFC3339 timestamp ending in `Z` (matches frappe-mcp-server format)."""
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -223,6 +254,10 @@ class ChatService:
         """
         tools_called: list[str] = []
         tool_invocations: list[dict[str, Any]] = []
+        # Pass-1 capture buffers (for the envelope formatter pass).
+        tool_results: list[dict[str, Any]] = []
+        draft_parts: list[str] = []
+        # Pass-2 output (the user-visible answer); accumulated for history.
         assistant_text_parts: list[str] = []
         block_events_emitted = 0
         failed = False
@@ -380,77 +415,46 @@ class ChatService:
                     "recursion_limit": self._settings.agent_recursion_limit,
                 }
 
-                # Splitter buffers `<ai-block>...</ai-block>` markup across
-                # token chunks so the FE never sees partial HTML. Prose
-                # tokens stream through; complete block tags are parsed and
-                # emitted as content_block events that the FE renders via
-                # getBlockComponent.
-                splitter = _BlockStreamSplitter()
+                # Pass-1 (the agent graph) streams to capture buffers, not
+                # to the FE. The user-visible content comes from Pass-2
+                # (the envelope formatter), which emits each completed
+                # block as a content / content_block event below.
 
-                def _emit_split(kind: str, payload: str):
-                    if kind == "content":
-                        return [{"type": "content", "text": payload}]
-                    # Block markup. parse_blocks may return TextBlock
-                    # segments if the LLM nested prose-like content inside
-                    # the tag; emit those as plain content too so the FE
-                    # markdown path picks them up.
-                    events_out: list[dict[str, Any]] = []
-                    for block in parse_blocks(payload):
-                        if block.type == "text":
-                            events_out.append({"type": "content", "text": block.content})
-                        else:
-                            events_out.append(
-                                {"type": "content_block", "block": block.model_dump()}
-                            )
-                    return events_out
-
-                # We deliberately flush in the success path AND in an except
-                # clause that re-raises — NOT in a `finally`. Yielding from
-                # `finally` raises RuntimeError("async generator ignored
-                # GeneratorExit") when the consumer (Starlette) calls
-                # `aclose()` on client disconnect, which is common whenever
-                # the splitter has buffered content (partial open-tag suffix
-                # or in-block markup).
+                # Pass 1 — agent graph. Tool-call events stream through;
+                # the model's text output is captured into draft_parts and
+                # NOT yielded (the envelope formatter will re-emit it).
                 with _tracer.start_as_current_span("agent.graph_run"):
-                    try:
-                        async for event in graph.astream_events(
-                            graph_input,
-                            config=graph_config,
-                            version="v2",
-                        ):
-                            translated = self._translate_event(
-                                event, tools_called, tool_invocations
-                            )
-                            if translated is None:
-                                continue
-                            if translated["type"] != "content":
-                                yield translated
-                                continue
-                            assistant_text_parts.append(translated["text"])
-                            for kind, payload in splitter.feed(translated["text"]):
-                                for ev in _emit_split(kind, payload):
-                                    if ev["type"] == "content_block":
-                                        block_events_emitted += 1
-                                    yield ev
-                    except Exception:
-                        # `except Exception` does not catch GeneratorExit
-                        # (which is BaseException), so client-disconnect
-                        # cleanup propagates cleanly without entering this
-                        # block.
-                        for kind, payload in splitter.flush():
-                            for ev in _emit_split(kind, payload):
-                                if ev["type"] == "content_block":
-                                    block_events_emitted += 1
-                                yield ev
-                        raise
+                    async for event in graph.astream_events(
+                        graph_input,
+                        config=graph_config,
+                        version="v2",
+                    ):
+                        translated = self._translate_event(
+                            event,
+                            tools_called,
+                            tool_invocations,
+                            tool_results,
+                            draft_parts,
+                        )
+                        if translated is not None:
+                            yield translated
 
-                    # Stream ended normally — flush any text the splitter is
-                    # still holding (only happens if the LLM cut off mid-tag).
-                    for kind, payload in splitter.flush():
-                        for ev in _emit_split(kind, payload):
-                            if ev["type"] == "content_block":
-                                block_events_emitted += 1
-                            yield ev
+                # Pass 2 — envelope formatter. Streams partial dicts; each
+                # completed block becomes a content / content_block event.
+                # Pass-1 errors would have been raised above and caught by
+                # the outer except; reaching here means Pass 1 completed.
+                draft_text = "".join(draft_parts)
+                with _tracer.start_as_current_span("agent.envelope_formatter"):
+                    async for ev in self._run_envelope_formatter(
+                        user_message=message,
+                        tool_results=tool_results,
+                        draft=draft_text,
+                    ):
+                        if ev["type"] == "content_block":
+                            block_events_emitted += 1
+                        if ev["type"] == "content":
+                            assistant_text_parts.append(ev["text"])
+                        yield ev
 
             except _ToolsUnavailable as exc:
                 # Tool-load boundary already emitted a single-line WARNING
@@ -569,6 +573,43 @@ class ChatService:
             logger.info("chat_turn_completed", **summary)
 
     # ------------------------------------------------------------------ #
+    # Pass-2: envelope formatter
+    # ------------------------------------------------------------------ #
+
+    async def _run_envelope_formatter(
+        self,
+        *,
+        user_message: str,
+        tool_results: list[dict[str, Any]],
+        draft: str,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Stream the envelope formatter pass, yielding SSE-schema events.
+
+        Drives `self._llm.with_structured_output(BLOCK_ENVELOPE_SCHEMA,
+        method="json_schema").astream(...)` and emits one
+        `content`/`content_block` event per envelope block as soon as
+        each block's JSON object closes (signalled by the next block
+        starting in the partial dict — see `iter_complete_blocks`).
+        """
+        formatter = self._llm.with_structured_output(BLOCK_ENVELOPE_SCHEMA, method="json_schema")
+        messages = build_formatter_messages(
+            user_message=user_message, tool_results=tool_results, draft=draft
+        )
+
+        state: dict[str, Any] = {}
+        last_partial: dict[str, Any] | None = None
+        async for partial in formatter.astream(messages):
+            last_partial = partial if isinstance(partial, dict) else None
+            for block in iter_complete_blocks(last_partial, state, final=False):
+                for ev in _events_from_envelope_block(block):
+                    yield ev
+        # Final flush — the last block in the envelope only commits at
+        # stream end (no following block to signal its close).
+        for block in iter_complete_blocks(last_partial, state, final=True):
+            for ev in _events_from_envelope_block(block):
+                yield ev
+
+    # ------------------------------------------------------------------ #
     # Event translation
     # ------------------------------------------------------------------ #
 
@@ -577,8 +618,19 @@ class ChatService:
         event: StreamEvent,
         tools_called: list[str],
         tool_invocations: list[dict[str, Any]],
+        tool_results: list[dict[str, Any]],
+        draft_parts: list[str],
     ) -> dict[str, Any] | None:
-        """Map one LangGraph v2 event to an SSE-schema dict, or None to skip."""
+        """Map one LangGraph v2 event to an SSE-schema dict, or None to skip.
+
+        Side effects (Pass-1 capture for the envelope formatter):
+        - `on_tool_start`: append to tools_called + tool_invocations; emit
+          tool_call SSE event so the FE can render "fetching..." UI.
+        - `on_tool_end`: append the tool result to tool_results; emit nothing.
+        - `on_chat_model_stream`: append text to draft_parts; emit nothing
+          (Pass-1 prose is suppressed because the envelope formatter pass
+          re-emits the answer in the wire-protocol shape).
+        """
         kind = event.get("event")
 
         if kind == "on_tool_start":
@@ -588,13 +640,32 @@ class ChatService:
             tool_invocations.append({"name": name, "args": args})
             return {"type": "tool_call", "name": name, "arguments": args}
 
+        if kind == "on_tool_end":
+            name = event.get("name") or "unknown"
+            output = event.get("data", {}).get("output")
+            # ToolMessage / arbitrary content — coerce to a printable form
+            # for the formatter's prompt; the formatter doesn't need the
+            # original object identity.
+            content = getattr(output, "content", None)
+            if content is not None:
+                result_text = content if isinstance(content, str) else str(content)
+            else:
+                result_text = str(output) if output is not None else ""
+            tool_results.append(
+                {
+                    "name": name,
+                    "args": tool_invocations[-1]["args"] if tool_invocations else {},
+                    "result": result_text,
+                }
+            )
+            return None
+
         if kind == "on_chat_model_stream":
             # Per-token streaming. Each event carries an AIMessageChunk;
-            # concatenated, the chunks form the final assistant message.
-            # We emit only chunks that have actual text and are NOT part of
-            # a tool-calling step. tool_call_chunks is the streaming
-            # counterpart to tool_calls — its presence means the model is
-            # currently emitting a tool invocation, not a user-visible reply.
+            # concatenated, the chunks form the Pass-1 assistant message.
+            # That draft is captured but NOT emitted to the FE — the
+            # envelope formatter pass (run after the graph completes) is
+            # what produces user-visible content events.
             chunk = event.get("data", {}).get("chunk")
             if not isinstance(chunk, AIMessageChunk):
                 return None
@@ -602,10 +673,10 @@ class ChatService:
                 return None
             content = chunk.content
             text = content if isinstance(content, str) else ""
-            if not text:
-                return None
-            return {"type": "content", "text": text}
+            if text:
+                draft_parts.append(text)
+            return None
 
-        # on_tool_end, on_chat_model_start, on_chat_model_end, on_chain_*,
-        # etc. are swallowed.
+        # on_chat_model_start, on_chat_model_end, on_chain_*, etc. are
+        # swallowed.
         return None

@@ -5,8 +5,15 @@ from __future__ import annotations
 import json
 
 import pytest
+from langchain_core.messages import HumanMessage, SystemMessage
 
-from ai_agent.blocks.envelope import BLOCK_ENVELOPE_SCHEMA, envelope_to_markup
+from ai_agent.blocks.envelope import (
+    BLOCK_ENVELOPE_SCHEMA,
+    ENVELOPE_FORMATTER_SYSTEM_PROMPT,
+    build_formatter_messages,
+    envelope_to_markup,
+    iter_complete_blocks,
+)
 from ai_agent.blocks.parser import parse_blocks
 
 
@@ -47,9 +54,7 @@ class TestEnvelopeToMarkup:
                 {
                     "type": "kpi",
                     "payload": {
-                        "metrics": [
-                            {"label": "Revenue", "value": 145000, "format": "currency"}
-                        ]
+                        "metrics": [{"label": "Revenue", "value": 145000, "format": "currency"}]
                     },
                 },
             ]
@@ -60,9 +65,7 @@ class TestEnvelopeToMarkup:
         assert parts[1].startswith('<ai-block type="kpi">')
 
     def test_strips_json_fence(self):
-        envelope = _envelope(
-            [{"type": "text", "payload": {"content": "fenced response"}}]
-        )
+        envelope = _envelope([{"type": "text", "payload": {"content": "fenced response"}}])
         fenced = f"```json\n{envelope}\n```"
         assert envelope_to_markup(fenced) == "fenced response"
 
@@ -70,9 +73,7 @@ class TestEnvelopeToMarkup:
         # Gemma 3 4B is documented to add commentary around the JSON object even
         # under constrained decoding. The translator must still find the
         # envelope.
-        envelope = _envelope(
-            [{"type": "text", "payload": {"content": "got it"}}]
-        )
+        envelope = _envelope([{"type": "text", "payload": {"content": "got it"}}])
         chatty = f"Sure, here's the response:\n{envelope}\nLet me know if you need more."
         assert envelope_to_markup(chatty) == "got it"
 
@@ -135,9 +136,7 @@ class TestEnvelopeToMarkup:
                     "type": "status_list",
                     "payload": {
                         "title": "Orders",
-                        "items": [
-                            {"label": "SO-001", "status": "Paid", "color": "green"}
-                        ],
+                        "items": [{"label": "SO-001", "status": "Paid", "color": "green"}],
                     },
                 }
             ]
@@ -164,3 +163,141 @@ class TestBlockEnvelopeSchema:
             for entry in BLOCK_ENVELOPE_SCHEMA["properties"]["blocks"]["items"]["oneOf"]
         }
         assert consts == {"text", "table", "chart", "kpi", "status_list"}
+
+
+class TestBuildFormatterMessages:
+    def test_returns_system_then_human(self):
+        msgs = build_formatter_messages(
+            user_message="how much did we make?",
+            tool_results=[],
+            draft="",
+        )
+        assert len(msgs) == 2
+        assert isinstance(msgs[0], SystemMessage)
+        assert isinstance(msgs[1], HumanMessage)
+
+    def test_system_prompt_is_default(self):
+        msgs = build_formatter_messages(user_message="anything", tool_results=[], draft="")
+        assert msgs[0].content == ENVELOPE_FORMATTER_SYSTEM_PROMPT
+
+    def test_system_prompt_overridable(self):
+        msgs = build_formatter_messages(
+            user_message="anything",
+            tool_results=[],
+            draft="",
+            system_prompt="CUSTOM",
+        )
+        assert msgs[0].content == "CUSTOM"
+
+    def test_user_message_includes_question_and_no_tools_marker(self):
+        msgs = build_formatter_messages(
+            user_message="give me totals",
+            tool_results=[],
+            draft="",
+        )
+        body = msgs[1].content
+        assert isinstance(body, str)
+        assert "USER ASKED:" in body
+        assert "give me totals" in body
+        assert "(no tools called)" in body
+        assert "(empty)" in body
+
+    def test_tool_results_serialised_into_body(self):
+        msgs = build_formatter_messages(
+            user_message="ok",
+            tool_results=[
+                {"name": "list_documents", "args": {"doctype": "Customer"}, "result": "[ok]"},
+                {"name": "aggregate", "args": {}, "result": "{'total': 5}"},
+            ],
+            draft="agent says hi",
+        )
+        body = msgs[1].content
+        assert isinstance(body, str)
+        assert "list_documents" in body
+        assert '"doctype": "Customer"' in body
+        assert "aggregate" in body
+        assert "agent says hi" in body
+
+    def test_long_tool_result_is_truncated(self):
+        long_result = "x" * 5000
+        msgs = build_formatter_messages(
+            user_message="ok",
+            tool_results=[{"name": "t", "args": {}, "result": long_result}],
+            draft="",
+        )
+        body = msgs[1].content
+        assert isinstance(body, str)
+        assert "…(truncated)" in body
+        # Body should be substantially shorter than original 5000 chars
+        # of result plus framing.
+        assert len(body) < 4500
+
+
+class TestIterCompleteBlocks:
+    def test_emits_only_blocks_followed_by_a_next_block(self):
+        # 3-block partial; only the first two are "definitely closed"
+        # because the third is the latest and may still be growing.
+        partial = {
+            "blocks": [
+                {"type": "text", "payload": {"content": "intro"}},
+                {"type": "kpi", "payload": {"metrics": [{"label": "rev", "value": 100}]}},
+                {"type": "table", "payload": {"title": "Tab", "columns": [], "rows": []}},
+            ]
+        }
+        state: dict = {}
+        emitted = list(iter_complete_blocks(partial, state, final=False))
+        assert [b["type"] for b in emitted] == ["text", "kpi"]
+        # 3rd block waits.
+        emitted2 = list(iter_complete_blocks(partial, state, final=False))
+        assert emitted2 == []
+
+    def test_final_flag_flushes_last_block(self):
+        partial = {
+            "blocks": [
+                {"type": "text", "payload": {"content": "hi"}},
+                {"type": "kpi", "payload": {"metrics": [{"label": "x", "value": 1}]}},
+            ]
+        }
+        state: dict = {}
+        # First call with final=False emits only the first.
+        first = list(iter_complete_blocks(partial, state, final=False))
+        assert [b["type"] for b in first] == ["text"]
+        # Then final=True flushes the second.
+        second = list(iter_complete_blocks(partial, state, final=True))
+        assert [b["type"] for b in second] == ["kpi"]
+
+    def test_idempotent_across_redundant_yields(self):
+        partial1 = {"blocks": [{"type": "text", "payload": {"content": "hi"}}]}
+        partial2 = {
+            "blocks": [
+                {"type": "text", "payload": {"content": "hi"}},
+                {"type": "kpi", "payload": {"metrics": [{"label": "x", "value": 1}]}},
+            ]
+        }
+        state: dict = {}
+        # First partial: 1 block, no next started, no final — emits nothing.
+        assert list(iter_complete_blocks(partial1, state, final=False)) == []
+        # Second partial: 2 blocks, first now has a next — emit first only.
+        out = list(iter_complete_blocks(partial2, state, final=False))
+        assert [b["type"] for b in out] == ["text"]
+        # Third call with same partial2 — nothing new.
+        assert list(iter_complete_blocks(partial2, state, final=False)) == []
+
+    def test_skips_malformed_block_dicts(self):
+        partial = {
+            "blocks": [
+                {"type": "text", "payload": {"content": "ok"}},
+                {"invalid": "shape"},
+                {"type": "kpi", "payload": {"metrics": [{"label": "x", "value": 1}]}},
+            ]
+        }
+        state: dict = {}
+        # final=True flushes everything.
+        out = list(iter_complete_blocks(partial, state, final=True))
+        assert [b["type"] for b in out] == ["text", "kpi"]
+
+    def test_none_or_non_dict_input_yields_nothing(self):
+        state: dict = {}
+        assert list(iter_complete_blocks(None, state, final=True)) == []
+        assert list(iter_complete_blocks({}, state, final=True)) == []
+        assert list(iter_complete_blocks({"blocks": "not-a-list"}, state, final=True)) == []
