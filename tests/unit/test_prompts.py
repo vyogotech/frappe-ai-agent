@@ -100,10 +100,13 @@ class TestBuildSystemPrompt:
         ):
             assert removed not in prompt, f"removed tool {removed!r} leaked into the prompt"
 
-    def test_warns_against_pie_bar_top_level_block_types(self):
-        # qwen3.5:9b regularly emitted <ai-block type="pie"> instead of
-        # <ai-block type="chart"> with chart_type:"pie". The parser now
-        # aliases these, but the prompt should still discourage the
-        # non-canonical form.
+    def test_preamble_is_block_type_agnostic(self):
+        # The unified envelope schema (in ai_agent.blocks.envelope) owns
+        # block-type instructions. The per-request preamble produced by
+        # build_system_prompt is contextual only — page, currency, date
+        # conventions, tool-use rules. Block-type examples here would
+        # conflict with the envelope's authoritative grammar.
         prompt = build_system_prompt({})
-        assert 'type="pie"' in prompt or 'type=\\"pie\\"' in prompt
+        assert "<ai-block" not in prompt
+        assert "chart_type" not in prompt
+        assert 'type="kpi"' not in prompt

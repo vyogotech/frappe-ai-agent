@@ -1,19 +1,23 @@
 """Per-request chat orchestration.
 
-`ChatService` holds the long-lived pieces (settings, llm, checkpointer, and a
-system-prompt builder) and builds a fresh MCP client + LangGraph agent per call
-to `handle_message`. Every request uses the caller's sid to authenticate with
-the MCP server so tool calls run under that Frappe user's permissions.
+`ChatService` holds the long-lived pieces (settings, llm, and a system-
+prompt builder) and builds a fresh MCP client + tool registry per call
+to `handle_message`. Every request uses the caller's sid to authenticate
+with the MCP server so tool calls run under that Frappe user's
+permissions.
+
+The agent execution itself runs through `ai_agent.agent.loop.run_agent_loop`,
+which drives a unified envelope schema (tool_call is a block type) via
+`llm.with_structured_output(...).astream(...)`. This replaces the prior
+LangGraph react-agent + envelope-formatter two-pass — that design forced
+Pass-2 to mirror Pass-1's block-type choices, regressing rich-block UX on
+small models.
 
 Events yielded here must match the SSE schema in `transport.sse_events`:
-`session` (announced first, carrying the resolved history id), `status`,
-`tool_call`, `content`, `content_block` (parsed `<ai-block>` markup),
-`error`, and `done`.
+`session` (announced first), `tool_call`, `content`, `content_block`,
+`error`, `done`.
 
-Chat history is persisted best-effort to Frappe via `FrappeHistoryClient`:
-we create a session if none is supplied, record the user's message before
-the graph runs, and record the final assistant message when it finishes.
-History write failures are logged but never abort the conversation.
+Chat history is persisted best-effort to Frappe via `FrappeHistoryClient`.
 """
 
 from __future__ import annotations
@@ -28,22 +32,12 @@ from uuid import uuid4
 
 import httpx
 import structlog
-from langchain_core.messages import AIMessageChunk, HumanMessage
-from langchain_core.runnables import RunnableConfig
-from langchain_core.runnables.schema import StreamEvent
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 
-from ai_agent.agent.graph import create_agent_graph
+from ai_agent.agent.loop import run_agent_loop
 from ai_agent.agent.prompts import build_system_prompt
-from ai_agent.agent.tool_errors import install_tool_error_handler
-from ai_agent.blocks.envelope import (
-    BLOCK_ENVELOPE_SCHEMA,
-    build_formatter_messages,
-    envelope_to_markup,
-    iter_complete_blocks,
-)
-from ai_agent.blocks.parser import parse_blocks
+from ai_agent.agent.tool_registry import ToolRegistry
 from ai_agent.config import Settings
 from ai_agent.integrations.frappe_history import FrappeHistoryClient
 from ai_agent.integrations.mcp import build_mcp_client_for_sid
@@ -62,10 +56,6 @@ _TITLE_MAX_LEN = 60
 # cold-start listing over a slow link while being short enough that the user
 # gets a clear error rather than a dead stream.
 _MCP_TOOLS_LOAD_TIMEOUT_S = 20.0
-
-
-_AI_BLOCK_OPEN = "<ai-block"
-_AI_BLOCK_CLOSE = "</ai-block>"
 
 
 # MCP tools that frappe-mcp-server keeps for backward compatibility but
@@ -113,97 +103,6 @@ def _tools_unavailable_message(root: BaseException) -> str:
     return "Tools unavailable."
 
 
-class _BlockStreamSplitter:
-    """State machine that splits streamed LLM text into prose and block markup.
-
-    The LLM emits per-token chunks via `on_chat_model_stream`. Streaming each
-    chunk as a content event would leak partial `<ai-block ...>...</ai-block>`
-    markup into the FE bubble (the user sees raw HTML scrolling in until the
-    closing tag arrives). Instead, this splitter:
-
-    - Streams chunks of prose as soon as they're "safe" (not a partial open
-      tag), as ("content", text) events.
-    - Buffers chunks once an `<ai-block` is detected, until the matching
-      `</ai-block>` arrives, then emits the complete markup as a single
-      ("block", markup) event for parse_blocks() to handle.
-
-    Yields `(kind, payload)` tuples where `kind` is `"content"` or `"block"`.
-    """
-
-    def __init__(self) -> None:
-        self._buf = ""
-        self._in_block = False
-
-    def feed(self, chunk: str):
-        self._buf += chunk
-        while True:
-            if not self._in_block:
-                idx = self._buf.find(_AI_BLOCK_OPEN)
-                if idx >= 0:
-                    if idx > 0:
-                        yield ("content", self._buf[:idx])
-                    self._buf = self._buf[idx:]
-                    self._in_block = True
-                    continue
-                # No open tag yet. Hold back any suffix that matches a
-                # prefix of "<ai-block" so we don't leak a partial open
-                # tag into the FE bubble.
-                safe_end = len(self._buf)
-                for n in range(min(len(_AI_BLOCK_OPEN) - 1, len(self._buf)), 0, -1):
-                    if _AI_BLOCK_OPEN.startswith(self._buf[-n:]):
-                        safe_end = len(self._buf) - n
-                        break
-                if safe_end > 0:
-                    yield ("content", self._buf[:safe_end])
-                    self._buf = self._buf[safe_end:]
-                break
-            else:
-                end_idx = self._buf.find(_AI_BLOCK_CLOSE)
-                if end_idx < 0:
-                    break
-                end = end_idx + len(_AI_BLOCK_CLOSE)
-                yield ("block", self._buf[:end])
-                self._buf = self._buf[end:]
-                self._in_block = False
-
-    def flush(self):
-        """Emit any residual buffered text. Called once the LLM stream ends.
-
-        If we're stuck inside a block (LLM cut off mid-tag), the partial
-        markup is emitted as content so the user at least sees what
-        arrived, instead of silently losing it.
-        """
-        if self._buf:
-            yield ("content", self._buf)
-            self._buf = ""
-            self._in_block = False
-
-
-def _events_from_envelope_block(block: dict[str, Any]) -> list[dict[str, Any]]:
-    """Translate one completed envelope block into SSE-schema events.
-
-    Single source of truth for "envelope block dict → wire-protocol
-    events". Text blocks become content events; structured blocks go
-    through the spec's `parse_blocks` to validate against the pydantic
-    models before becoming content_block events. Unknown / malformed
-    blocks (which the schema's `oneOf` should make unreachable, but be
-    defensive) are silently dropped.
-    """
-    try:
-        markup = envelope_to_markup(json.dumps({"blocks": [block]}, ensure_ascii=False))
-    except (ValueError, TypeError):
-        return []
-    if not markup:
-        return []
-    events: list[dict[str, Any]] = []
-    for parsed in parse_blocks(markup):
-        if parsed.type == "text":
-            events.append({"type": "content", "text": parsed.content})
-        else:
-            events.append({"type": "content_block", "block": parsed.model_dump()})
-    return events
-
-
 def _utcnow_rfc3339_z() -> str:
     """RFC3339 timestamp ending in `Z` (matches frappe-mcp-server format)."""
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -229,13 +128,11 @@ class ChatService:
         *,
         settings: Settings,
         llm: Any,
-        checkpointer: Any,
         system_prompt_builder: SystemPromptBuilder = build_system_prompt,
         history: FrappeHistoryClient | None = None,
     ) -> None:
         self._settings = settings
         self._llm = llm
-        self._checkpointer = checkpointer
         self._build_system_prompt = system_prompt_builder
         self._history = history or FrappeHistoryClient(base_url=settings.frappe_url)
 
@@ -254,10 +151,8 @@ class ChatService:
         """
         tools_called: list[str] = []
         tool_invocations: list[dict[str, Any]] = []
-        # Pass-1 capture buffers (for the envelope formatter pass).
-        tool_results: list[dict[str, Any]] = []
-        draft_parts: list[str] = []
-        # Pass-2 output (the user-visible answer); accumulated for history.
+        # Final user-visible content (text blocks from the agent loop's
+        # last iteration), accumulated for history persistence.
         assistant_text_parts: list[str] = []
         block_events_emitted = 0
         failed = False
@@ -315,13 +210,22 @@ class ChatService:
             # brand-new AI Chat Session row.
             yield {"type": "session", "id": session_id}
 
-            # Persist the user's message. Best-effort; failures do not abort.
-            await self._history.save_message(
-                sid=user_context.sid,
-                session=session_id,
-                role="user",
-                content=message,
-            )
+            # Persist the user's message. Best-effort: a Frappe outage must
+            # not abort the chat turn — log and continue.
+            try:
+                await self._history.save_message(
+                    sid=user_context.sid,
+                    session=session_id,
+                    role="user",
+                    content=message,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "chat_history_user_message_write_failed",
+                    session_id=session_id,
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:200],
+                )
 
             try:
                 # Per-request MCP client carrying the caller's sid cookie.
@@ -376,83 +280,43 @@ class ChatService:
                 if pre_count != len(tools):
                     load_span.set_attribute("tools_filtered", pre_count - len(tools))
 
-                # Install an error handler on every tool so exceptions raised
-                # by individual tool calls become LLM-visible tool
-                # observations instead of aborting the whole graph run.
-                # `install_tool_error_handler` both wraps the coroutine (so
-                # non-ToolException errors are re-raised as ToolException)
-                # and sets `handle_tool_error` — both are needed because
-                # LangChain's built-in hook only catches ToolException, and
-                # MCP/Frappe errors don't subclass it.
-                for tool in tools:
-                    install_tool_error_handler(tool)
-
                 logger.debug(
                     "chat_tools_loaded",
                     count=len(tools),
                     session_id=session_id,
                 )
 
-                # Per-request prompt lets the UI pass page context per message.
-                system_prompt = self._build_system_prompt(context or {})
+                # Per-request preamble — page context + currency + date
+                # conventions + tool-use rules. Injected into the unified
+                # agent system message by `build_agent_messages`. The
+                # envelope schema itself is fixed in `ai_agent.blocks.envelope`.
+                context_preamble = self._build_system_prompt(context or {})
+                tool_registry = ToolRegistry(tools)
 
-                # Cheap: create_react_agent just wires a graph around the model
-                # and tool list. No network calls here.
-                graph = create_agent_graph(
-                    llm=self._llm,
-                    tools=tools,
-                    system_prompt=system_prompt,
-                    checkpointer=self._checkpointer,
-                )
-
-                graph_input = {"messages": [HumanMessage(content=message)]}
-                graph_config: RunnableConfig = {
-                    "configurable": {"thread_id": session_id},
-                    # Why (default 50): smaller local models loop while
-                    # exploring doctype schemas and trip the LangGraph
-                    # default of 25 before converging. Configurable via
-                    # AI_AGENT_AGENT_RECURSION_LIMIT.
-                    "recursion_limit": self._settings.agent_recursion_limit,
-                }
-
-                # Pass-1 (the agent graph) streams to capture buffers, not
-                # to the FE. The user-visible content comes from Pass-2
-                # (the envelope formatter), which emits each completed
-                # block as a content / content_block event below.
-
-                # Pass 1 — agent graph. Tool-call events stream through;
-                # the model's text output is captured into draft_parts and
-                # NOT yielded (the envelope formatter will re-emit it).
-                with _tracer.start_as_current_span("agent.graph_run"):
-                    async for event in graph.astream_events(
-                        graph_input,
-                        config=graph_config,
-                        version="v2",
-                    ):
-                        translated = self._translate_event(
-                            event,
-                            tools_called,
-                            tool_invocations,
-                            tool_results,
-                            draft_parts,
-                        )
-                        if translated is not None:
-                            yield translated
-
-                # Pass 2 — envelope formatter. Streams partial dicts; each
-                # completed block becomes a content / content_block event.
-                # Pass-1 errors would have been raised above and caught by
-                # the outer except; reaching here means Pass 1 completed.
-                draft_text = "".join(draft_parts)
-                with _tracer.start_as_current_span("agent.envelope_formatter"):
-                    async for ev in self._run_envelope_formatter(
+                # Unified agent loop. tool_call is a block type in the
+                # envelope; the loop drives the LLM via
+                # `with_structured_output(...).astream(...)` and yields
+                # SSE-schema events directly.
+                # `max_steps` derived from settings.agent_recursion_limit
+                # (each step is at most one LLM call + tool fan-out).
+                max_steps = max(1, self._settings.agent_recursion_limit // 2)
+                with _tracer.start_as_current_span("agent.run") as run_span:
+                    run_span.set_attribute("tool_count", len(tool_registry))
+                    run_span.set_attribute("max_steps", max_steps)
+                    async for ev in run_agent_loop(
+                        llm=self._llm,
+                        tool_registry=tool_registry,
                         user_message=message,
-                        tool_results=tool_results,
-                        draft=draft_text,
+                        context_preamble=context_preamble,
+                        history=None,
+                        max_steps=max_steps,
                     ):
-                        if ev["type"] == "content_block":
+                        if ev["type"] == "tool_call":
+                            tools_called.append(ev["name"])
+                            tool_invocations.append({"name": ev["name"], "args": ev["arguments"]})
+                        elif ev["type"] == "content_block":
                             block_events_emitted += 1
-                        if ev["type"] == "content":
+                        elif ev["type"] == "content":
                             assistant_text_parts.append(ev["text"])
                         yield ev
 
@@ -524,13 +388,21 @@ class ChatService:
                 except (TypeError, ValueError):
                     # Arguments weren't JSON-serialisable — drop them silently.
                     tool_args_json = None
-            await self._history.save_message(
-                sid=user_context.sid,
-                session=session_id,
-                role="assistant",
-                content=assistant_content,
-                tool_args_json=tool_args_json,
-            )
+            try:
+                await self._history.save_message(
+                    sid=user_context.sid,
+                    session=session_id,
+                    role="assistant",
+                    content=assistant_content,
+                    tool_args_json=tool_args_json,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "chat_history_assistant_message_write_failed",
+                    session_id=session_id,
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:200],
+                )
 
             yield {
                 "type": "done",
@@ -571,112 +443,3 @@ class ChatService:
             if error_type is not None:
                 summary["error_type"] = error_type
             logger.info("chat_turn_completed", **summary)
-
-    # ------------------------------------------------------------------ #
-    # Pass-2: envelope formatter
-    # ------------------------------------------------------------------ #
-
-    async def _run_envelope_formatter(
-        self,
-        *,
-        user_message: str,
-        tool_results: list[dict[str, Any]],
-        draft: str,
-    ) -> AsyncGenerator[dict[str, Any], None]:
-        """Stream the envelope formatter pass, yielding SSE-schema events.
-
-        Drives `self._llm.with_structured_output(BLOCK_ENVELOPE_SCHEMA,
-        method="json_schema").astream(...)` and emits one
-        `content`/`content_block` event per envelope block as soon as
-        each block's JSON object closes (signalled by the next block
-        starting in the partial dict — see `iter_complete_blocks`).
-        """
-        formatter = self._llm.with_structured_output(BLOCK_ENVELOPE_SCHEMA, method="json_schema")
-        messages = build_formatter_messages(
-            user_message=user_message, tool_results=tool_results, draft=draft
-        )
-
-        state: dict[str, Any] = {}
-        last_partial: dict[str, Any] | None = None
-        async for partial in formatter.astream(messages):
-            last_partial = partial if isinstance(partial, dict) else None
-            for block in iter_complete_blocks(last_partial, state, final=False):
-                for ev in _events_from_envelope_block(block):
-                    yield ev
-        # Final flush — the last block in the envelope only commits at
-        # stream end (no following block to signal its close).
-        for block in iter_complete_blocks(last_partial, state, final=True):
-            for ev in _events_from_envelope_block(block):
-                yield ev
-
-    # ------------------------------------------------------------------ #
-    # Event translation
-    # ------------------------------------------------------------------ #
-
-    @staticmethod
-    def _translate_event(
-        event: StreamEvent,
-        tools_called: list[str],
-        tool_invocations: list[dict[str, Any]],
-        tool_results: list[dict[str, Any]],
-        draft_parts: list[str],
-    ) -> dict[str, Any] | None:
-        """Map one LangGraph v2 event to an SSE-schema dict, or None to skip.
-
-        Side effects (Pass-1 capture for the envelope formatter):
-        - `on_tool_start`: append to tools_called + tool_invocations; emit
-          tool_call SSE event so the FE can render "fetching..." UI.
-        - `on_tool_end`: append the tool result to tool_results; emit nothing.
-        - `on_chat_model_stream`: append text to draft_parts; emit nothing
-          (Pass-1 prose is suppressed because the envelope formatter pass
-          re-emits the answer in the wire-protocol shape).
-        """
-        kind = event.get("event")
-
-        if kind == "on_tool_start":
-            name = event.get("name") or "unknown"
-            args = event.get("data", {}).get("input") or {}
-            tools_called.append(name)
-            tool_invocations.append({"name": name, "args": args})
-            return {"type": "tool_call", "name": name, "arguments": args}
-
-        if kind == "on_tool_end":
-            name = event.get("name") or "unknown"
-            output = event.get("data", {}).get("output")
-            # ToolMessage / arbitrary content — coerce to a printable form
-            # for the formatter's prompt; the formatter doesn't need the
-            # original object identity.
-            content = getattr(output, "content", None)
-            if content is not None:
-                result_text = content if isinstance(content, str) else str(content)
-            else:
-                result_text = str(output) if output is not None else ""
-            tool_results.append(
-                {
-                    "name": name,
-                    "args": tool_invocations[-1]["args"] if tool_invocations else {},
-                    "result": result_text,
-                }
-            )
-            return None
-
-        if kind == "on_chat_model_stream":
-            # Per-token streaming. Each event carries an AIMessageChunk;
-            # concatenated, the chunks form the Pass-1 assistant message.
-            # That draft is captured but NOT emitted to the FE — the
-            # envelope formatter pass (run after the graph completes) is
-            # what produces user-visible content events.
-            chunk = event.get("data", {}).get("chunk")
-            if not isinstance(chunk, AIMessageChunk):
-                return None
-            if getattr(chunk, "tool_call_chunks", None):
-                return None
-            content = chunk.content
-            text = content if isinstance(content, str) else ""
-            if text:
-                draft_parts.append(text)
-            return None
-
-        # on_chat_model_start, on_chat_model_end, on_chain_*, etc. are
-        # swallowed.
-        return None

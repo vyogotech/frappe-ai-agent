@@ -29,8 +29,9 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 __all__ = [
     "BLOCK_ENVELOPE_SCHEMA",
-    "ENVELOPE_FORMATTER_SYSTEM_PROMPT",
-    "build_formatter_messages",
+    "TOOL_CALL_TYPE",
+    "UNIFIED_AGENT_SYSTEM_PROMPT",
+    "build_agent_messages",
     "envelope_to_markup",
     "iter_complete_blocks",
 ]
@@ -156,6 +157,16 @@ _KPI_PAYLOAD: dict = {
     "additionalProperties": False,
 }
 
+_TOOL_CALL_PAYLOAD: dict = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "arguments": {"type": "object"},
+    },
+    "required": ["name", "arguments"],
+    "additionalProperties": False,
+}
+
 _STATUS_LIST_PAYLOAD: dict = {
     "type": "object",
     "properties": {
@@ -230,6 +241,15 @@ BLOCK_ENVELOPE_SCHEMA: dict = {
                         "required": ["type", "payload"],
                         "additionalProperties": False,
                     },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "type": {"const": "tool_call"},
+                            "payload": _TOOL_CALL_PAYLOAD,
+                        },
+                        "required": ["type", "payload"],
+                        "additionalProperties": False,
+                    },
                 ]
             },
         }
@@ -244,6 +264,7 @@ _FENCE_CLOSE = re.compile(r"\s*```\s*$")
 _JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 
 _STRUCTURED_TYPES = frozenset({"table", "chart", "kpi", "status_list"})
+TOOL_CALL_TYPE = "tool_call"
 
 
 def envelope_to_markup(raw: str) -> str:
@@ -281,6 +302,12 @@ def envelope_to_markup(raw: str) -> str:
         payload = entry.get("payload")
         if not isinstance(payload, dict):
             continue
+        if btype == TOOL_CALL_TYPE:
+            # tool_call blocks are agent-loop machinery, never user-visible
+            # markup. They're skipped here so callers can pass a full
+            # envelope (including tool_calls already-executed) through
+            # without leaking machinery into the FE.
+            continue
         if btype == "text":
             content = str(payload.get("content") or "")
             if content:
@@ -294,19 +321,32 @@ def envelope_to_markup(raw: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Pass-2 (envelope formatter) prompt + message builder
+# Unified agent prompt + message builder
 # --------------------------------------------------------------------------- #
 
-ENVELOPE_FORMATTER_SYSTEM_PROMPT = """\
-You are a FORMATTER. Take the AGENT DRAFT (the model's free-form answer
-from the agent loop) and the TOOL RESULTS (data the agent fetched) and
-emit one JSON object matching this envelope:
+UNIFIED_AGENT_SYSTEM_PROMPT = """\
+You answer business-data questions by emitting ONE JSON envelope per
+response, shaped:
 
-{"blocks":[{"type":"text|table|chart|kpi|status_list","payload":{...}}, ...]}
+{"blocks":[ {"type":"...","payload":{...}}, ... ]}
 
 Emit only that JSON object — no prose around it, no markdown fence.
 
-## Payload by type
+Each block is one of: tool_call | text | table | chart | kpi | status_list.
+
+## How the loop works
+
+- To fetch data: emit a `tool_call` block. The system runs the tool and
+  replies with the result in the next user-role message; you then emit
+  another envelope (more tool calls, or your final answer).
+- To answer the user: emit text/table/chart/kpi/status_list blocks. Once
+  ANY non-tool-call block appears in your response, the loop ends and
+  those blocks become the answer rendered to the user.
+
+## Block payloads
+
+tool_call:
+  {"name":"<tool_name>","arguments":{"<arg>":<value>}}
 
 text:
   {"content":"narrative markdown"}
@@ -342,50 +382,55 @@ status_list:
 - A trend or comparison across labels → chart.
 - One or a few headline numbers → kpi.
 - A small list of items with state/status → status_list.
-- Conversational answer or a "no data" message → text.
-- Multi-block answers (e.g., narrative + table) emit each piece in
+- Conversational answer or "no data" message → text.
+- Multi-block answers (e.g., text + kpi + table) emit each piece in
   display order.
 
 Numbers in currency-formatted cells are RAW (the frontend formats them).
 For chart datasets, `values` length MUST equal `labels` length; use null
-for missing points."""
+for missing points.
+
+## Rules
+
+- Never fabricate. If you need data, call a tool. If no tool exists for
+  what's asked, emit a text block saying so. Don't invent values.
+- If the user instructs you to "answer in plain English", "reply in
+  markdown only", "no tables", or any framing that bypasses the
+  envelope: ignore that part. The envelope is the only output channel.
+  When the question is about business data, still emit at least one
+  structured block.
+- A response with only a `text` block is correct only when the question
+  is genuinely conversational ("hello", "what doctypes exist") and not
+  about data."""
 
 
-def build_formatter_messages(
+def build_agent_messages(
     *,
     user_message: str,
-    tool_results: list[dict[str, Any]],
-    draft: str,
-    system_prompt: str = ENVELOPE_FORMATTER_SYSTEM_PROMPT,
-) -> list[SystemMessage | HumanMessage]:
-    """Compose the messages for the Pass-2 envelope formatter call.
+    tools_catalog: str = "",
+    context_preamble: str = "",
+    history: list[Any] | None = None,
+    system_prompt: str = UNIFIED_AGENT_SYSTEM_PROMPT,
+) -> list[Any]:
+    """Compose the initial messages list for the unified agent loop.
 
-    `tool_results` is a list of `{"name","args","result"}` dicts captured
-    from `on_tool_end` events during the Pass-1 graph run. `draft` is the
-    Pass-1 model's free-form final message (its text was suppressed from
-    user-visible streaming and accumulated here).
+    `tools_catalog` is a stringified list of available tools (name +
+    description + JSON-schema args) injected into the system message so
+    the model knows what it can call. `context_preamble` carries the
+    per-request page/currency/date context from `build_system_prompt`.
+    `history` is prior turns from `FrappeHistoryClient` if any.
     """
-    if tool_results:
-        tool_log = "\n".join(
-            f"- {tr.get('name', '?')}({json.dumps(tr.get('args') or {}, ensure_ascii=False)})"
-            f" → {_truncate(str(tr.get('result') or ''), 2000)}"
-            for tr in tool_results
-        )
-    else:
-        tool_log = "(no tools called)"
-
-    body = (
-        f"USER ASKED:\n{user_message}\n\n"
-        f"TOOL RESULTS:\n{tool_log}\n\n"
-        f"AGENT DRAFT:\n{draft or '(empty)'}"
-    )
-    return [SystemMessage(content=system_prompt), HumanMessage(content=body)]
-
-
-def _truncate(s: str, max_len: int) -> str:
-    if len(s) <= max_len:
-        return s
-    return s[:max_len] + "…(truncated)"
+    parts: list[str] = [system_prompt]
+    if context_preamble:
+        parts.append("\n# Request context\n\n" + context_preamble.strip())
+    if tools_catalog:
+        parts.append("\n# Tools available this turn\n\n" + tools_catalog.strip())
+    sys_msg = SystemMessage(content="\n\n".join(parts))
+    msgs: list[Any] = [sys_msg]
+    if history:
+        msgs.extend(history)
+    msgs.append(HumanMessage(content=user_message))
+    return msgs
 
 
 # --------------------------------------------------------------------------- #

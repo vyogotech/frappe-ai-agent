@@ -9,8 +9,9 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from ai_agent.blocks.envelope import (
     BLOCK_ENVELOPE_SCHEMA,
-    ENVELOPE_FORMATTER_SYSTEM_PROMPT,
-    build_formatter_messages,
+    TOOL_CALL_TYPE,
+    UNIFIED_AGENT_SYSTEM_PROMPT,
+    build_agent_messages,
     envelope_to_markup,
     iter_complete_blocks,
 )
@@ -157,80 +158,83 @@ class TestBlockEnvelopeSchema:
         # prompt.
         assert BLOCK_ENVELOPE_SCHEMA["properties"]["blocks"]["maxItems"] == 6
 
-    def test_one_of_covers_all_block_types(self):
+    def test_one_of_covers_all_block_types_including_tool_call(self):
         consts = {
             entry["properties"]["type"]["const"]
             for entry in BLOCK_ENVELOPE_SCHEMA["properties"]["blocks"]["items"]["oneOf"]
         }
-        assert consts == {"text", "table", "chart", "kpi", "status_list"}
+        assert consts == {"text", "table", "chart", "kpi", "status_list", "tool_call"}
+
+    def test_tool_call_type_constant(self):
+        assert TOOL_CALL_TYPE == "tool_call"
 
 
-class TestBuildFormatterMessages:
-    def test_returns_system_then_human(self):
-        msgs = build_formatter_messages(
-            user_message="how much did we make?",
-            tool_results=[],
-            draft="",
+class TestToolCallBlock:
+    def test_envelope_to_markup_drops_tool_call_blocks(self):
+        # tool_call is agent-loop machinery — must never become FE markup.
+        raw = json.dumps(
+            {
+                "blocks": [
+                    {"type": "tool_call", "payload": {"name": "x", "arguments": {}}},
+                    {"type": "text", "payload": {"content": "visible answer"}},
+                ]
+            }
         )
+        assert envelope_to_markup(raw) == "visible answer"
+
+    def test_tool_call_payload_requires_name_and_arguments(self):
+        tool_call_branch = next(
+            entry
+            for entry in BLOCK_ENVELOPE_SCHEMA["properties"]["blocks"]["items"]["oneOf"]
+            if entry["properties"]["type"]["const"] == "tool_call"
+        )
+        payload_schema = tool_call_branch["properties"]["payload"]
+        assert set(payload_schema["required"]) == {"name", "arguments"}
+        assert payload_schema["additionalProperties"] is False
+
+
+class TestBuildAgentMessages:
+    def test_returns_system_then_human(self):
+        msgs = build_agent_messages(user_message="how much did we make?")
         assert len(msgs) == 2
         assert isinstance(msgs[0], SystemMessage)
         assert isinstance(msgs[1], HumanMessage)
+        assert msgs[1].content == "how much did we make?"
 
-    def test_system_prompt_is_default(self):
-        msgs = build_formatter_messages(user_message="anything", tool_results=[], draft="")
-        assert msgs[0].content == ENVELOPE_FORMATTER_SYSTEM_PROMPT
+    def test_system_prompt_includes_unified_agent_text(self):
+        msgs = build_agent_messages(user_message="x")
+        assert UNIFIED_AGENT_SYSTEM_PROMPT in msgs[0].content
 
-    def test_system_prompt_overridable(self):
-        msgs = build_formatter_messages(
-            user_message="anything",
-            tool_results=[],
-            draft="",
-            system_prompt="CUSTOM",
+    def test_context_preamble_injected(self):
+        msgs = build_agent_messages(
+            user_message="x", context_preamble="Page: Dashboard\nCurrency: $ (USD)"
         )
-        assert msgs[0].content == "CUSTOM"
+        assert "Page: Dashboard" in msgs[0].content
+        assert "Currency: $ (USD)" in msgs[0].content
 
-    def test_user_message_includes_question_and_no_tools_marker(self):
-        msgs = build_formatter_messages(
-            user_message="give me totals",
-            tool_results=[],
-            draft="",
+    def test_tools_catalog_injected(self):
+        msgs = build_agent_messages(
+            user_message="x",
+            tools_catalog="- list_documents: ...\n  args: {doctype: string}",
         )
-        body = msgs[1].content
-        assert isinstance(body, str)
-        assert "USER ASKED:" in body
-        assert "give me totals" in body
-        assert "(no tools called)" in body
-        assert "(empty)" in body
+        assert "list_documents" in msgs[0].content
+        assert "Tools available this turn" in msgs[0].content
 
-    def test_tool_results_serialised_into_body(self):
-        msgs = build_formatter_messages(
-            user_message="ok",
-            tool_results=[
-                {"name": "list_documents", "args": {"doctype": "Customer"}, "result": "[ok]"},
-                {"name": "aggregate", "args": {}, "result": "{'total': 5}"},
-            ],
-            draft="agent says hi",
-        )
-        body = msgs[1].content
-        assert isinstance(body, str)
-        assert "list_documents" in body
-        assert '"doctype": "Customer"' in body
-        assert "aggregate" in body
-        assert "agent says hi" in body
+    def test_no_catalog_no_preamble_means_no_extra_sections(self):
+        msgs = build_agent_messages(user_message="x")
+        content = msgs[0].content
+        assert "Tools available this turn" not in content
+        assert "Request context" not in content
 
-    def test_long_tool_result_is_truncated(self):
-        long_result = "x" * 5000
-        msgs = build_formatter_messages(
-            user_message="ok",
-            tool_results=[{"name": "t", "args": {}, "result": long_result}],
-            draft="",
-        )
-        body = msgs[1].content
-        assert isinstance(body, str)
-        assert "…(truncated)" in body
-        # Body should be substantially shorter than original 5000 chars
-        # of result plus framing.
-        assert len(body) < 4500
+    def test_history_messages_inserted_between_system_and_user(self):
+        from langchain_core.messages import AIMessage
+
+        prior = [HumanMessage(content="prev question"), AIMessage(content="prev answer")]
+        msgs = build_agent_messages(user_message="follow up", history=prior)
+        assert isinstance(msgs[0], SystemMessage)
+        assert msgs[1] is prior[0]
+        assert msgs[2] is prior[1]
+        assert msgs[3].content == "follow up"
 
 
 class TestIterCompleteBlocks:
