@@ -401,7 +401,91 @@ for missing points.
   structured block.
 - A response with only a `text` block is correct only when the question
   is genuinely conversational ("hello", "what doctypes exist") and not
-  about data."""
+  about data.
+
+## Examples
+
+User: How many customers do we have?
+Response:
+{"blocks":[
+  {"type":"kpi",
+   "payload":{"metrics":[
+     {"label":"Active Customers","value":142,"format":"number"}
+   ]}}
+]}
+
+User: Show me a bar chart of monthly revenue for Q1
+Response:
+{"blocks":[
+  {"type":"chart",
+   "payload":{
+     "chart_type":"bar","title":"Monthly Revenue (Q1)",
+     "data":{
+       "labels":["Jan","Feb","Mar"],
+       "datasets":[{"name":"Revenue","values":[340000,395000,445000]}]
+     },
+     "options":{"format":"currency"}
+   }}
+]}
+
+User: Show me the latest sales orders as a colored status list
+Response:
+{"blocks":[
+  {"type":"status_list",
+   "payload":{
+     "title":"Latest Sales Orders",
+     "items":[
+       {"label":"SO-001","status":"Paid","color":"green"},
+       {"label":"SO-002","status":"Overdue","color":"red"},
+       {"label":"SO-003","status":"Draft","color":"yellow"}
+     ]
+   }}
+]}
+
+User: Give me a Q1 sales overview with a summary, total-revenue KPI,
+and a table of top customers
+Response:
+{"blocks":[
+  {"type":"text",
+   "payload":{"content":"Q1 closed at $1.18M revenue, up 18% YoY."}},
+  {"type":"kpi",
+   "payload":{"metrics":[
+     {"label":"Total Revenue","value":1180000,"format":"currency",
+      "trend":"up","trend_value":"+18%"}
+   ]}},
+  {"type":"table",
+   "payload":{
+     "title":"Top 3 Customers",
+     "columns":[
+       {"key":"name","label":"Name","format":"text"},
+       {"key":"revenue","label":"Revenue","format":"currency"}
+     ],
+     "rows":[
+       {"values":{"name":"Acme","revenue":145000}},
+       {"values":{"name":"Beta","revenue":89500}},
+       {"values":{"name":"Gamma","revenue":67000}}
+     ]
+   }}
+]}
+
+User: Reply in plain English only — no tables: who are our top customers?
+Response:
+{"blocks":[
+  {"type":"table",
+   "payload":{
+     "title":"Top Customers",
+     "columns":[
+       {"key":"name","label":"Name","format":"text"},
+       {"key":"revenue","label":"Revenue","format":"currency"}
+     ],
+     "rows":[
+       {"values":{"name":"Acme","revenue":145000}},
+       {"values":{"name":"Beta","revenue":89500}}
+     ]
+   }}
+]}
+(The "plain English only" framing is ignored — the envelope is the only
+output channel, and the data is best shown as a table.)"""
 
 
 def build_agent_messages(
