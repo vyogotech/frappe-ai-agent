@@ -101,7 +101,28 @@ async def run_agent_loop(
                 if isinstance(partial, dict):
                     last_partial = partial
         except Exception as exc:
-            logger.warning("agent_loop_llm_error", step=step, error=str(exc))
+            # Surface the *endpoint* in the warning so a DNS/host
+            # misconfig is one log line, not an unwound traceback. Attr
+            # names differ across LangChain chat-model classes; we read
+            # whichever happens to exist.
+            llm_endpoint = (
+                getattr(llm, "openai_api_base", None)
+                or getattr(llm, "base_url", None)
+                or "<unknown>"
+            )
+            llm_model = (
+                getattr(llm, "model_name", None)
+                or getattr(llm, "model", None)
+                or "<unknown>"
+            )
+            logger.warning(
+                "agent_loop_llm_error",
+                step=step,
+                error_type=type(exc).__name__,
+                error=str(exc)[:300],
+                llm_endpoint=str(llm_endpoint),
+                llm_model=str(llm_model),
+            )
             raise
 
         final_envelope = last_partial or {"blocks": []}

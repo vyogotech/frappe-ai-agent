@@ -39,3 +39,6 @@ htmlcov/
 
 # Local dev compose (contains machine-specific paths and credentials)
 docker-compose.dev.yml
+
+# Firecrawl scratch output
+.firecrawl/

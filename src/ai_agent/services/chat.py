@@ -253,6 +253,7 @@ class ChatService:
                             "chat_tools_load_failed_soft_degrade",
                             session_id=session_id,
                             sid_prefix=sid_prefix,
+                            mcp_url=self._settings.mcp_server_url,
                             error_type=type(root).__name__,
                             error=str(root)[:200],
                         )
@@ -341,6 +342,10 @@ class ChatService:
                     sid_present=bool(user_context.sid),
                     error_type=type(exc).__name__,
                     root_cause_type=type(display_exc).__name__,
+                    error=str(display_exc)[:300],
+                    llm_provider=self._settings.llm_provider,
+                    llm_model=self._settings.llm_model,
+                    llm_base_url=self._settings.llm_base_url,
                 )
                 # Record on the active span so a trace UI shows ERROR
                 # status without consulting the log. record_exception
