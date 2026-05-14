@@ -268,6 +268,49 @@ class TestMaxStepsCap:
         assert "couldn't converge" in events[-1]["text"].lower()
 
 
+class TestEmptyEnvelopeDefense:
+    @pytest.mark.asyncio
+    async def test_empty_envelope_first_iter_triggers_one_retry(self):
+        # Iter 1: empty envelope (the bug case). Iter 2: valid response.
+        llm = _fake_llm_with_yields(
+            [
+                [{"blocks": []}],
+                [{"blocks": [{"type": "text", "payload": {"content": "fixed"}}]}],
+            ]
+        )
+        events = await _drain(
+            run_agent_loop(llm=llm, tool_registry=_FakeRegistry(), user_message="hi")
+        )
+        # Retry succeeded — see the fixed content, no fallback text.
+        assert events == [{"type": "content", "text": "fixed"}]
+
+    @pytest.mark.asyncio
+    async def test_empty_envelope_after_retry_yields_fallback(self):
+        # Iter 1: empty. Iter 2: still empty. Loop must surface a
+        # fallback content event instead of hanging.
+        llm = _fake_llm_with_yields([[{"blocks": []}], [{"blocks": []}]])
+        events = await _drain(
+            run_agent_loop(llm=llm, tool_registry=_FakeRegistry(), user_message="hi")
+        )
+        assert len(events) == 1
+        assert events[0]["type"] == "content"
+        assert "wasn't able" in events[0]["text"].lower()
+
+    @pytest.mark.asyncio
+    async def test_unknown_block_type_only_yields_fallback(self):
+        # The schema's `oneOf` should make this unreachable, but defend
+        # against it: if every block in the final iteration has a type
+        # the renderer doesn't know, we surface a "couldn't be rendered"
+        # fallback so the FE never sees an empty event stream.
+        llm = _fake_llm_with_yields([[{"blocks": [{"type": "garbage", "payload": {}}]}]])
+        events = await _drain(
+            run_agent_loop(llm=llm, tool_registry=_FakeRegistry(), user_message="hi")
+        )
+        assert len(events) == 1
+        assert events[0]["type"] == "content"
+        assert "couldn't be rendered" in events[0]["text"].lower()
+
+
 class TestLLMError:
     @pytest.mark.asyncio
     async def test_llm_exception_propagates(self):

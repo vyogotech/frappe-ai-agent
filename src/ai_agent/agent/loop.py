@@ -107,17 +107,58 @@ async def run_agent_loop(
         final_envelope = last_partial or {"blocks": []}
         blocks: list[dict[str, Any]] = list(final_envelope.get("blocks") or [])
         tool_blocks = [b for b in blocks if _is_tool_call(b)]
+        non_tool_blocks = [b for b in blocks if not _is_tool_call(b)]
+
+        # Defense: empty envelope (no blocks at all). The schema's
+        # `minItems: 1` should make this unreachable, but a stalled
+        # provider stream can land us here. Retry the same iteration
+        # once with an explicit "emit any block" prod.
+        if not blocks:
+            if step == 0:  # only one retry, on the first iteration
+                logger.warning("agent_loop_empty_envelope_retry", step=step)
+                messages.append(
+                    HumanMessage(
+                        content=(
+                            "Your previous response was empty. Emit a JSON "
+                            "envelope with at least one block — a text block "
+                            "is fine if you're unsure."
+                        )
+                    )
+                )
+                continue
+            # Already retried — surface a placeholder text block instead
+            # of hanging. The FE still gets a renderable envelope.
+            logger.warning("agent_loop_empty_envelope_final", step=step)
+            yield {
+                "type": "content",
+                "text": "I wasn't able to compose a response. Please try rephrasing.",
+            }
+            return
 
         if not tool_blocks:
             # Final iteration — emit the buffered envelope as SSE events
             # using iter_complete_blocks so the FE gets the same
             # incremental render as a true astream replay.
             state: dict[str, Any] = {}
+            emitted_any = False
             for block in iter_complete_blocks(final_envelope, state, final=True):
                 if _is_tool_call(block):
                     continue
                 for ev in _events_from_block(block):
+                    emitted_any = True
                     yield ev
+            if not emitted_any:
+                # All non-tool blocks were malformed and dropped by
+                # parse_blocks / envelope_to_markup. Surface a fallback.
+                logger.warning(
+                    "agent_loop_no_emittable_blocks",
+                    step=step,
+                    block_types=[b.get("type") for b in non_tool_blocks],
+                )
+                yield {
+                    "type": "content",
+                    "text": "I produced a response but it couldn't be rendered.",
+                }
             return
 
         # Tool-calling iteration. Emit synthetic tool_call SSE events so

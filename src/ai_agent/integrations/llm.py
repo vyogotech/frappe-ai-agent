@@ -21,12 +21,22 @@ def create_llm(settings: Settings) -> BaseChatModel:
         # which is too small for our system prompt + tool results + answer
         # and causes the model to silently truncate earlier context, producing
         # garbled mid-response output (e.g. "A$6,neakers" splice bug).
+        #
+        # `repeat_penalty=1.0` disables Ollama's repeated-token penalty
+        # (default 1.1). For structured JSON output that penalty hurts —
+        # closing braces, commas, and quote characters legitimately recur
+        # and the down-weighting can push the sampler off the correct
+        # next token. `top_k=1` forces pure greedy decoding even when
+        # the backend still samples at temperature=0. Combined, these
+        # make small-model structured output reliably deterministic.
         return ChatOllama(
             model=settings.llm_model,
             base_url=settings.llm_base_url,
             temperature=settings.llm_temperature,
             num_predict=settings.llm_max_tokens,
             num_ctx=settings.llm_num_ctx,
+            repeat_penalty=1.0,
+            top_k=1,
         )
 
     return init_chat_model(
