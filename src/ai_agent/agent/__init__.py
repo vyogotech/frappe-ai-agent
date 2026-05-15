@@ -1,1 +1,1 @@
-"""LangGraph ReAct agent orchestration."""
+"""Envelope-based agent loop and tool registry."""

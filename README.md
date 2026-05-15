@@ -135,7 +135,7 @@ All settings are loaded from environment or `.env` with the `AI_AGENT_` prefix. 
 |----------|---------|-------------|
 | `AI_AGENT_HOST` | `0.0.0.0` | Bind host |
 | `AI_AGENT_PORT` | `8484` | Bind port |
-| `AI_AGENT_WORKERS` | `1` | Uvicorn workers. Wired into the Dockerfile CMD as `uvicorn --workers ${AI_AGENT_WORKERS:-1}`. Raise above 1 only with a shared checkpointer (see `AI_AGENT_AGENT_CHECKPOINTER`). |
+| `AI_AGENT_WORKERS` | `1` | Uvicorn workers. Wired into the Dockerfile CMD as `uvicorn --workers ${AI_AGENT_WORKERS:-1}`. The agent is stateless per-request (history is fetched from Frappe each turn), so raising workers is safe — bottleneck is Ollama / hosted-LLM throughput. |
 | `AI_AGENT_CORS_ORIGINS` | `["http://localhost:8000"]` | JSON list of credentialed-CORS origins. `"*"` is not allowed because cookies are forwarded |
 | `AI_AGENT_LLM_PROVIDER` | `ollama` | `ollama`, `openai`, `anthropic`, `google` |
 | `AI_AGENT_LLM_BASE_URL` | `http://localhost:11434` | Provider base URL |
@@ -323,21 +323,6 @@ Message rows stop appearing in Frappe.
    the client auto-refreshes once, but a sustained block means the
    `/app` page is unreachable, see the
    `frappe_history_csrf_fetch_failed` log).
-
-### Multi-worker conversation amnesia ("AI keeps forgetting")
-
-**Symptoms:** First turn in a session works; second turn behaves as
-if the prior context never happened, even though Frappe rows show
-both turns.
-
-1. Look for a startup `checkpointer_memory_multi_worker_unsafe`
-   warning. It fires when `AI_AGENT_WORKERS > 1` and
-   `AI_AGENT_AGENT_CHECKPOINTER=memory`. Each worker has its own
-   in-memory checkpointer, so a follow-up turn that lands on a
-   different worker sees a fresh thread state.
-2. Switch to a shared backend (see
-   [Multi-worker deployments](#multi-worker-deployments)) or set
-   `AI_AGENT_WORKERS=1` if a single worker is enough for your load.
 
 ### Rate-limit `429`s
 

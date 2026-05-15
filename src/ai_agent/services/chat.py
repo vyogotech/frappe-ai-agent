@@ -8,10 +8,7 @@ permissions.
 
 The agent execution itself runs through `ai_agent.agent.loop.run_agent_loop`,
 which drives a unified envelope schema (tool_call is a block type) via
-`llm.with_structured_output(...).astream(...)`. This replaces the prior
-LangGraph react-agent + envelope-formatter two-pass — that design forced
-Pass-2 to mirror Pass-1's block-type choices, regressing rich-block UX on
-small models.
+`llm.with_structured_output(...).astream(...)`.
 
 Events yielded here must match the SSE schema in `transport.sse_events`:
 `session` (announced first), `tool_call`, `content`, `content_block`,
@@ -27,7 +24,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import httpx
@@ -37,12 +34,15 @@ from langchain_core.messages import AIMessage, HumanMessage
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 
+if TYPE_CHECKING:
+    from langchain_core.messages import BaseMessage
+
 from ai_agent.agent.loop import run_agent_loop
 from ai_agent.agent.prompts import build_system_prompt
 from ai_agent.agent.tool_registry import ToolRegistry
 from ai_agent.config import Settings
 from ai_agent.integrations.frappe_history import FrappeHistoryClient
-from ai_agent.integrations.mcp import build_mcp_client_for_sid
+from ai_agent.integrations.mcp import build_mcp_client_for_sid, filter_deprecated
 from ai_agent.middleware.sid import UserContext
 
 logger = structlog.get_logger(__name__)
@@ -56,23 +56,6 @@ _TITLE_MAX_LEN = 60
 # MCP tools/list timeout moved to Settings.mcp_tools_load_timeout_s so ops
 # can tune it per-environment (slow LAN, busy MCP). The constant lookup
 # stays local to keep the call site readable.
-
-
-# MCP tools that frappe-mcp-server keeps for backward compatibility but
-# that we don't want the LLM to invoke. The project-status family was
-# replaced by generic aggregate_documents / run_report flows; surfacing
-# them just gives the LLM a tempting wrong-path option that fails on
-# sites without the corresponding doctypes.
-_DEPRECATED_TOOLS = frozenset(
-    {
-        "get_project_status",
-        "analyze_project_timeline",
-        "get_resource_allocation",
-        "generate_project_report",
-        "resource_utilization_analysis",
-        "budget_variance_analysis",
-    }
-)
 
 
 def _tools_unavailable_message(root: BaseException) -> str:
@@ -273,14 +256,12 @@ class ChatService:
                         tools = []
                     load_span.set_attribute("tool_count", len(tools))
 
-                # Drop deprecated MCP tools (project-status family, kept
-                # in frappe-mcp-server for backward compat but no longer
-                # documented). They confuse the LLM and surface as failed
+                # Drop deprecated MCP tools (project-status family — see
+                # `integrations.mcp.DEPRECATED_TOOLS` for the policy and
+                # the list). They confuse the LLM and surface as failed
                 # tool_call cards on doctypes the user doesn't even use.
-                # Filter here rather than in MCP itself so the server can
-                # keep serving older clients that still depend on them.
                 pre_count = len(tools)
-                tools = [t for t in tools if t.name not in _DEPRECATED_TOOLS]
+                tools = filter_deprecated(tools)
                 if pre_count != len(tools):
                     load_span.set_attribute("tools_filtered", pre_count - len(tools))
 
@@ -316,7 +297,7 @@ class ChatService:
                 # rather than aborting the whole turn. `tmp-*` ids are unsaved
                 # sessions (history is by definition empty); skip the
                 # round-trip.
-                history_messages: list[Any] = []
+                history_messages: list[BaseMessage] = []
                 if session_id and not session_id.startswith("tmp-"):
                     try:
                         rows = await self._history.list_messages(

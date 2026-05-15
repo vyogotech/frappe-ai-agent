@@ -39,6 +39,8 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 
 if TYPE_CHECKING:
+    from langchain_core.messages import BaseMessage
+
     from ai_agent.agent.tool_registry import ToolRegistry
 
 from ai_agent.blocks.envelope import (
@@ -53,11 +55,6 @@ from ai_agent.blocks.parser import parse_blocks
 logger = structlog.get_logger(__name__)
 
 
-# Maximum number of model→tool→model round-trips per user turn. The Plan
-# review recommended `settings.agent_recursion_limit // 2` (≈ 25). We don't
-# read settings here so the loop stays decoupled; the caller passes the cap.
-_DEFAULT_MAX_STEPS = 25
-
 # Repeat-detection trip count: if the model emits the same (tool, args) this
 # many times in one turn, we bail out. Prevents infinite tool loops on a
 # model that's confused about how to use the result.
@@ -70,8 +67,8 @@ async def run_agent_loop(
     tool_registry: ToolRegistry,
     user_message: str,
     context_preamble: str = "",
-    history: list[Any] | None = None,
-    max_steps: int = _DEFAULT_MAX_STEPS,
+    history: list[BaseMessage] | None = None,
+    max_steps: int = 25,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Drive the unified-schema agent loop, yielding SSE-schema events.
 

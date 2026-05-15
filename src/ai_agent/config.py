@@ -29,10 +29,10 @@ class Settings(BaseSettings):
     # Server
     host: str = "0.0.0.0"
     port: int = 8484
-    # Default to 1 so the checkpointer-vs-workers warning is rare and
-    # intentional (operators who pick multi-worker deliberately set this).
     # The Dockerfile honours `${AI_AGENT_WORKERS:-1}`, so this default
-    # matches actual container behaviour.
+    # matches actual container behaviour. The agent is stateless per
+    # request (history is fetched from Frappe each turn) so raising
+    # workers is safe whenever the LLM/MCP backend can keep up.
     workers: int = 1
     cors_origins: list[str] = ["http://localhost:8000"]
 
@@ -69,9 +69,9 @@ class Settings(BaseSettings):
     llm_num_ctx: int = 16384
 
     # Agent
-    # Why: small models loop while exploring schema and trip the LangGraph
-    # default of 25 before converging. 50 is enough headroom without letting
-    # a truly stuck agent run forever.
+    # Why: small models loop while exploring schema; the envelope loop
+    # divides this by 2 to bound model→tool→model round-trips per turn.
+    # 50 is enough headroom without letting a truly stuck agent run forever.
     agent_recursion_limit: int = 50
     # Per-sid rate limit on POST /api/v1/chat. slowapi syntax: "<count>/<period>"
     # (minute / second / hour / day).

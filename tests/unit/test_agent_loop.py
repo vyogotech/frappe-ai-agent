@@ -8,26 +8,30 @@ from unittest.mock import MagicMock
 import pytest
 
 from ai_agent.agent.loop import _events_from_block, run_agent_loop
+from ai_agent.agent.tool_registry import ToolRegistry
 
 
-class _FakeRegistry:
-    """In-test ToolRegistry stand-in. Records calls + returns scripted results."""
+class _FakeRegistry(ToolRegistry):
+    """In-test ToolRegistry stand-in. Records calls + returns scripted results.
+
+    Subclassing keeps the static type compatible with `run_agent_loop`'s
+    `tool_registry: ToolRegistry` parameter without forcing the test to
+    build real `BaseTool` instances.
+    """
 
     def __init__(self, results: dict[str, str] | None = None) -> None:
+        super().__init__([])
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self._results = results or {}
 
     def schemas(self) -> str:
         return "(no tools)"
 
-    def __len__(self) -> int:  # required by chat.py span attr
-        return 0
-
     def names(self) -> set[str]:
         return set(self._results)
 
-    async def ainvoke(self, name: str, args: dict[str, Any]) -> str:
-        self.calls.append((name, args))
+    async def ainvoke(self, name: str, args: dict[str, Any] | None) -> str:
+        self.calls.append((name, args or {}))
         return self._results.get(name, f"result for {name}")
 
 

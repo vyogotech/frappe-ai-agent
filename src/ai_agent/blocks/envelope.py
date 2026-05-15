@@ -23,9 +23,12 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
+
+if TYPE_CHECKING:
+    from langchain_core.messages import BaseMessage
 
 __all__ = [
     "BLOCK_ENVELOPE_SCHEMA",
@@ -505,9 +508,9 @@ def build_agent_messages(
     user_message: str,
     tools_catalog: str = "",
     context_preamble: str = "",
-    history: list[Any] | None = None,
+    history: list[BaseMessage] | None = None,
     system_prompt: str = UNIFIED_AGENT_SYSTEM_PROMPT,
-) -> list[Any]:
+) -> list[BaseMessage]:
     """Compose the initial messages list for the unified agent loop.
 
     `tools_catalog` is a stringified list of available tools (name +
@@ -522,7 +525,7 @@ def build_agent_messages(
     if tools_catalog:
         parts.append("\n# Tools available this turn\n\n" + tools_catalog.strip())
     sys_msg = SystemMessage(content="\n\n".join(parts))
-    msgs: list[Any] = [sys_msg]
+    msgs: list[BaseMessage] = [sys_msg]
     if history:
         msgs.extend(history)
     msgs.append(HumanMessage(content=user_message))
