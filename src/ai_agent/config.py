@@ -73,35 +73,25 @@ class Settings(BaseSettings):
     # default of 25 before converging. 50 is enough headroom without letting
     # a truly stuck agent run forever.
     agent_recursion_limit: int = 50
-    # Why: per-sid rate limit on POST /api/v1/chat. slowapi syntax;
-    # "<count>/<period>" — minute / second / hour / day.
+    # Per-sid rate limit on POST /api/v1/chat. slowapi syntax: "<count>/<period>"
+    # (minute / second / hour / day).
     agent_rate_limit: str = "30/minute"
-    # LangGraph checkpointer backend. Determines where per-conversation
-    # state (thread history that drives multi-turn continuity) lives:
-    #   "memory" — InMemorySaver. Process-local; lost on restart. The
-    #     default, but NOT safe with workers > 1 because uvicorn does
-    #     not pin a sid to a worker — a second turn has a 1/workers
-    #     chance of seeing the prior checkpoint.
-    #   "sqlite:/abs/path/to/checkpoints.db" — AsyncSqliteSaver. Shared
-    #     across processes via the file. Production-acceptable for
-    #     low-concurrency deployments; langgraph's docs caution against
-    #     it under heavy write load.
-    #   "sqlite::memory:" — in-process SQLite. Same process-local
-    #     limitation as memory; useful for tests.
-    agent_checkpointer: str = "memory"
-
-    @field_validator("agent_checkpointer")
-    @classmethod
-    def _validate_checkpointer(cls, v: str) -> str:
-        # Catches "memry" / "Postgres://..." typos that would have
-        # silently fallen back to in-memory at startup.
-        if v == "memory" or v.startswith("sqlite:"):
-            return v
-        raise ValueError(f"agent_checkpointer must be 'memory' or 'sqlite:<path>', got {v!r}")
 
     # MCP: Streamable HTTP endpoint. frappe-mcp-server mounts /mcp on its
     # main HTTP port (default 8080), NOT the port+1 MCP-protocol-only server.
     mcp_server_url: str = "http://localhost:8080/mcp"
+
+    # How long the agent waits for `mcp_client.get_tools()` before giving
+    # up and soft-degrading to "tools unavailable". A timeout here is
+    # almost always a misconfigured MCP server or a stale sid the MCP
+    # auth layer is busy validating — 20s is the upper bound on either.
+    mcp_tools_load_timeout_s: float = 20.0
+
+    # Connect/read timeout for the agent's own outbound HTTP probes
+    # (`/health` reachability checks against MCP and Frappe). These are
+    # cheap pings; keep them fast so a flaky downstream doesn't block
+    # the liveness handler.
+    health_probe_timeout_s: float = 5.0
 
     # Frappe URL for chat history persistence
     frappe_url: str = "http://localhost:8000"

@@ -31,7 +31,7 @@ class HealthService:
         parsed = urlparse(self._settings.mcp_server_url)
         url = urlunparse(parsed._replace(path="/health", query="", fragment=""))
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=self._settings.health_probe_timeout_s) as client:
                 resp = await client.get(url)
                 return {"ok": resp.status_code == 200}
         except Exception as e:
@@ -48,7 +48,7 @@ class HealthService:
             return {"ok": True, "skipped": True, "reason": f"no probe for provider={provider}"}
         url = self._settings.llm_base_url.removesuffix("/v1") + "/api/tags"
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=self._settings.health_probe_timeout_s) as client:
                 resp = await client.get(url)
                 return {"ok": resp.status_code == 200}
         except Exception as e:

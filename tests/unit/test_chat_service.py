@@ -264,6 +264,9 @@ async def test_handle_message_surfaces_mcp_tools_timeout_as_error_event():
     """When MCP tools/list exceeds the bound, the user gets a clear
     error event with the timeout cause."""
     service = _make_service()
+    # Shrink the per-request timeout to a tiny value so we don't sit on
+    # the default 20 s wait. Reaches the same code path as a real timeout.
+    service._settings = service._settings.model_copy(update={"mcp_tools_load_timeout_s": 0.05})
     user_context = UserContext(sid="abc123")
 
     mock_client = MagicMock()
@@ -276,10 +279,7 @@ async def test_handle_message_surfaces_mcp_tools_timeout_as_error_event():
 
     mock_client.get_tools = _hang
 
-    with (
-        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
-        patch("ai_agent.services.chat._MCP_TOOLS_LOAD_TIMEOUT_S", 0.05),
-    ):
+    with patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client):
         events = await _drain(
             service.handle_message(
                 message="hi",

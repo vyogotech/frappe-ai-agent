@@ -7,13 +7,13 @@ AI agent service for Frappe/ERPNext — natural-language questions in, structure
 
 ## Overview
 
-`frappe-ai-agent` is the backend that powers the AI sidebar in a Frappe/ERPNext deployment. The browser POSTs a user message; the agent runs a LangGraph ReAct loop, calls ERPNext tools through `frappe-mcp-server`, and streams back a mix of prose and rich content blocks (charts, tables, KPI cards, status lists) for the frontend to render.
+`frappe-ai-agent` is the backend that powers the AI sidebar in a Frappe/ERPNext deployment. The browser POSTs a user message; the agent runs a custom envelope-based tool-use loop, calls ERPNext tools through `frappe-mcp-server`, and streams back a mix of prose and rich content blocks (charts, tables, KPI cards, status lists) for the frontend to render.
 
 Three design points are load-bearing:
 
 1. **Permissions stay in Frappe.** The browser forwards the user's `sid` cookie on every chat request. The agent authenticates the request from that cookie and forwards the same `sid` to MCP for every tool call, so each tool runs under the caller's Frappe user — no shadow admin account, no permission re-implementation.
 2. **No fabrication.** The system prompt forbids inventing data; every value must come from a tool call in the same turn. Tool errors are folded back into the conversation as observations so the LLM can explain what failed instead of aborting.
-3. **Streaming with typed blocks.** Prose tokens stream to the UI as they arrive. `<ai-block>` markup is buffered across token boundaries, parsed into typed Pydantic models, then emitted as a single `content_block` event — the frontend never sees half-finished tags.
+3. **Envelope-protocol streaming.** The LLM emits a single JSON envelope per turn whose blocks are one of `tool_call | text | table | chart | kpi | status_list`. The agent loop runs tool-call blocks itself and re-prompts; non-tool blocks become `content` / `content_block` SSE events. The browser sees discrete typed events, not partial markup.
 
 ## Architecture
 
@@ -21,7 +21,7 @@ Three design points are load-bearing:
 Browser (Vue sidebar)
    │  POST /api/v1/chat  (SSE, Cookie: sid=...)
    ▼
-frappe-ai-agent  (FastAPI + LangGraph ReAct loop)
+frappe-ai-agent  (FastAPI + envelope tool-use loop)
    │
    ├──▶ LLM provider                (Ollama / OpenAI / Anthropic / Google)
    ├──▶ frappe-mcp-server           (MCP Streamable HTTP, sid forwarded)
@@ -34,10 +34,10 @@ Per chat request, `ChatService.handle_message` does the following:
 
 1. Resolve or create an `AI Chat Session` in Frappe (best-effort; falls back to a temporary in-memory id if Frappe is down).
 2. Persist the user message to `AI Chat Message`.
-3. Build a fresh MCP client carrying the caller's `sid` and load its tools (timeout: 20 s).
-4. Wrap every tool with an error handler that turns exceptions into LLM-visible observations instead of graph aborts.
+3. Build a fresh MCP client carrying the caller's `sid` and load its tools (timeout configurable via `mcp_tools_load_timeout_s`, default 20 s).
+4. Register each tool in `ToolRegistry`, which surfaces exceptions to the LLM as observations rather than aborting the loop.
 5. Build a per-request system prompt with page context and currency.
-6. Run the LangGraph ReAct agent and translate its event stream into SSE events.
+6. Run `run_agent_loop`: structured-output envelope → execute any `tool_call` blocks → re-prompt with results → repeat until the envelope contains terminal blocks. Translate each block into the matching SSE event.
 7. Persist the final assistant message (success or error).
 
 ## Quick start
@@ -144,10 +144,11 @@ All settings are loaded from environment or `.env` with the `AI_AGENT_` prefix. 
 | `AI_AGENT_LLM_TEMPERATURE` | `0.2` | Low default tightens tool-call argument formatting on small local models |
 | `AI_AGENT_LLM_MAX_TOKENS` | `8192` | Max output tokens (Ollama `num_predict`) |
 | `AI_AGENT_LLM_NUM_CTX` | `16384` | Ollama context window. Ignored for hosted providers. The Ollama default of 2048 is too small for system prompt + tool results + answer |
-| `AI_AGENT_AGENT_RECURSION_LIMIT` | `50` | LangGraph graph recursion ceiling — small models need headroom while exploring doctype schemas before converging |
+| `AI_AGENT_AGENT_RECURSION_LIMIT` | `50` | Envelope-loop recursion ceiling — small models need headroom while exploring doctype schemas before converging |
 | `AI_AGENT_AGENT_RATE_LIMIT` | `30/minute` | slowapi-format per-sid rate limit on `POST /api/v1/chat` (e.g. `100/hour`, `10/second`) |
-| `AI_AGENT_AGENT_CHECKPOINTER` | `memory` | LangGraph checkpointer backend. `memory` is process-local and **not safe with `workers > 1`** (see [Multi-worker deployments](#multi-worker-deployments)). `sqlite:/abs/path/to/ckpt.db` opens an `AsyncSqliteSaver` against the file. `sqlite::memory:` is in-process SQLite. Invalid values are rejected at startup. |
 | `AI_AGENT_MCP_SERVER_URL` | `http://localhost:8080/mcp` | MCP Streamable HTTP endpoint |
+| `AI_AGENT_MCP_TOOLS_LOAD_TIMEOUT_S` | `20.0` | Per-request bound on `tools/list`. A timeout becomes a single SSE `error` event, not a hung stream |
+| `AI_AGENT_HEALTH_PROBE_TIMEOUT_S` | `5.0` | Timeout on the agent's own `/health` reachability pings against MCP and Ollama |
 | `AI_AGENT_FRAPPE_URL` | `http://localhost:8000` | Frappe URL for chat history writes |
 | `AI_AGENT_OTEL_ENDPOINT` | _empty_ | OTLP gRPC endpoint. Empty = tracing disabled |
 | `AI_AGENT_OTEL_SERVICE_NAME` | `frappe-ai-agent` | Resource attribute on emitted spans |
@@ -169,25 +170,13 @@ The default config targets a local Ollama running `qwen3.5:9b`. The system promp
 
 Tools are loaded per-request from `frappe-mcp-server` via the Streamable HTTP transport (`langchain-mcp-adapters`). A new MCP client is built for every chat turn so the caller's `sid` cookie can be attached as a request header — sharing clients across users would leak sessions.
 
-`tools/list` is bounded by a 20 s timeout. If MCP is unreachable, the user sees a single SSE `error` event and a `done` frame; the stream does not hang.
+`tools/list` is bounded by `AI_AGENT_MCP_TOOLS_LOAD_TIMEOUT_S` (default 20 s). If MCP is unreachable, the user sees a single SSE `error` event and a `done` frame; the stream does not hang.
 
-Every loaded tool is wrapped by `install_tool_error_handler` so that any exception (MCP errors, Frappe permission denials, httpx timeouts) becomes a string tool-observation the LLM can read and explain to the user. Permission errors get a clearer prefix (`Access denied: permission error — …`). Without this wrapping, non-`ToolException` errors escape LangChain's ToolNode and abort the whole graph run.
+`ToolRegistry.ainvoke` catches every tool exception (MCP errors, Frappe permission denials, httpx timeouts) and surfaces it to the LLM as a string observation rather than aborting the loop. Permission errors get a clearer prefix (`Access denied: permission error — …`).
 
-## Multi-worker deployments
+## Multi-turn state
 
-The LangGraph agent keeps per-conversation state in a *checkpointer* — the same thread id (== Frappe chat session id) replays the conversation history on the next turn. The default `AI_AGENT_AGENT_CHECKPOINTER=memory` is process-local. With the default `AI_AGENT_WORKERS=1` (single worker) this is fine. Raise `AI_AGENT_WORKERS` above 1 and a follow-up turn has a 1-in-N chance of landing on the worker that has the prior checkpoint — the LLM "forgets" what was said even though the Frappe history rows preserve it for the UI scrollback.
-
-If you run with `workers > 1`, set a shared backend:
-
-```bash
-AI_AGENT_AGENT_CHECKPOINTER=sqlite:/var/lib/frappe-ai-agent/checkpoints.db
-```
-
-The agent uses [`AsyncSqliteSaver`](https://langchain-ai.github.io/langgraph/reference/checkpoints/#langgraph.checkpoint.sqlite.aio.AsyncSqliteSaver) (`langgraph-checkpoint-sqlite`). LangGraph's docs caution against SQLite under heavy write concurrency, but a single Frappe deployment with a handful of users is well inside its envelope.
-
-A loud `checkpointer_memory_multi_worker_unsafe` warning fires at startup if `workers > 1` AND `agent_checkpointer == memory`, with remediation advice in the log fields. The warning is at WARNING level, so any aggregator with a default-severity filter will pick it up.
-
-For ephemeral / dev use, `sqlite::memory:` keeps state inside the process (same constraint as `memory`, with the SQLite backend's overhead).
+The agent does NOT yet replay prior turns into the LLM context — `run_agent_loop` is called with `history=None`. Frappe still persists every turn into `AI Chat Message` (used for sidebar scrollback and offline review), but the LLM only sees the current turn's user message. Destructive operations therefore require both the request and its confirmation in the same conversation thread to be impossible — by design, the agent refuses until per-turn history wiring is added.
 
 ## Chat history
 
@@ -207,9 +196,9 @@ src/ai_agent/
 ├── app.py                       FastAPI factory + lifespan + middleware wiring
 ├── config.py                    Pydantic settings (env-var loader)
 ├── agent/
-│   ├── graph.py                 LangGraph ReAct graph + in-memory checkpointer
+│   ├── loop.py                  Envelope-driven tool-use loop
 │   ├── prompts.py               System prompt template + page/currency builder
-│   └── tool_errors.py           Wrap MCP tools so errors become observations
+│   └── tool_registry.py         Tool dispatcher with per-tool error handling
 ├── blocks/
 │   ├── models.py                Pydantic models for chart/table/kpi/status_list
 │   ├── parser.py                Extract <ai-block> markup → typed blocks
@@ -271,7 +260,7 @@ uv run pytest --cov=ai_agent           # coverage
 - **OpenTelemetry tracing** — set `AI_AGENT_OTEL_ENDPOINT` to an OTLP gRPC collector to enable export. Tracing is off when the env var is empty. Spans emitted per chat turn (nested under the FastAPI auto-instrumented HTTP span):
   - `agent.chat_turn` (the whole handler — `session_id`, `tools_called_count`, `content_chars`, `block_events_emitted`, `failed`, `error_type`)
   - `agent.load_tools` (MCP `tools/list` call — `tool_count`)
-  - `agent.graph_run` (LangGraph `astream_events` loop)
+  - `agent.run` (the envelope tool-use loop — `tool_count`, `max_steps`)
   - `agent.history.write` (each Frappe REST write — `kind`, `status_code`, `failed`)
 
   On the failure path the `agent.chat_turn` span carries an ERROR status and the original exception via `record_exception`, so a trace UI bubbles it up.
@@ -294,12 +283,13 @@ spans / counters from the Operability branch are wired.
    underneath any TaskGroup wrapper.
 2. Inspect the `agent.chat_turn` span (status: ERROR) in your trace UI.
    `record_exception` on the span carries the type / message / stack;
-   the child spans (`agent.load_tools`, `agent.graph_run`) show which
+   the child spans (`agent.load_tools`, `agent.run`) show which
    phase blew up.
 3. Common causes:
    - MCP unreachable → `agent.load_tools` span error;
-     `RuntimeError: MCP tools/list timed out after 20s`
-   - LLM unreachable → `agent.graph_run` span error; httpx connect /
+     `RuntimeError: MCP tools/list timed out after <N>s` (N is from
+     `mcp_tools_load_timeout_s`)
+   - LLM unreachable → `agent.run` span error; httpx connect /
      timeout under it
    - Frappe Login expired → tool observations return
      `Access denied: permission error — …` (those are not errors,

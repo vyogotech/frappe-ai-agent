@@ -32,11 +32,14 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
+
+if TYPE_CHECKING:
+    from ai_agent.agent.tool_registry import ToolRegistry
 
 from ai_agent.blocks.envelope import (
     BLOCK_ENVELOPE_SCHEMA,
@@ -64,9 +67,7 @@ _REPEAT_LIMIT = 3
 async def run_agent_loop(
     *,
     llm: BaseChatModel,
-    # `tool_registry` is `ai_agent.agent.tool_registry.ToolRegistry`; typed
-    # as Any to avoid an import cycle with tool_registry → loop.
-    tool_registry: Any,
+    tool_registry: ToolRegistry,
     user_message: str,
     context_preamble: str = "",
     history: list[Any] | None = None,

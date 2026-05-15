@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class TextBlock(BaseModel):
@@ -36,7 +36,6 @@ class ChartData(BaseModel):
 
     labels: list[str]
     datasets: list[Dataset]
-    y_labels: list[str] | None = Field(default=None, alias="yLabels")
 
 
 class ChartOptions(BaseModel):

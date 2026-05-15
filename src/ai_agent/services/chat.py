@@ -32,6 +32,8 @@ from uuid import uuid4
 
 import httpx
 import structlog
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, HumanMessage
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 
@@ -51,11 +53,9 @@ SystemPromptBuilder = Callable[[dict[str, Any]], str]
 
 _TITLE_MAX_LEN = 60
 
-# Upper bound for the MCP tools/list call. If the MCP server is unreachable or
-# hung, we must not wedge the SSE generator forever — 20 s is enough for a
-# cold-start listing over a slow link while being short enough that the user
-# gets a clear error rather than a dead stream.
-_MCP_TOOLS_LOAD_TIMEOUT_S = 20.0
+# MCP tools/list timeout moved to Settings.mcp_tools_load_timeout_s so ops
+# can tune it per-environment (slow LAN, busy MCP). The constant lookup
+# stays local to keep the call site readable.
 
 
 # MCP tools that frappe-mcp-server keeps for backward compatibility but
@@ -117,7 +117,7 @@ class ChatService:
         self,
         *,
         settings: Settings,
-        llm: Any,
+        llm: BaseChatModel,
         system_prompt_builder: SystemPromptBuilder = build_system_prompt,
         history: FrappeHistoryClient | None = None,
     ) -> None:
@@ -125,6 +125,14 @@ class ChatService:
         self._llm = llm
         self._build_system_prompt = system_prompt_builder
         self._history = history or FrappeHistoryClient(base_url=settings.frappe_url)
+
+    async def aclose(self) -> None:
+        """Release any owned async resources (HTTP connection pools, etc.).
+
+        Called from the FastAPI lifespan teardown so the FrappeHistoryClient's
+        shared AsyncClient drops its sockets before the process exits.
+        """
+        await self._history.aclose()
 
     async def handle_message(
         self,
@@ -222,17 +230,19 @@ class ChatService:
                 mcp_client = build_mcp_client_for_sid(self._settings, user_context.sid)
                 tools: list[Any] = []
                 tools_unavailable_reason: str | None = None
+                tools_load_timeout_s = self._settings.mcp_tools_load_timeout_s
                 with _tracer.start_as_current_span("agent.load_tools") as load_span:
                     try:
                         tools = await asyncio.wait_for(
                             mcp_client.get_tools(),
-                            timeout=_MCP_TOOLS_LOAD_TIMEOUT_S,
+                            timeout=tools_load_timeout_s,
                         )
                     except TimeoutError as exc:
                         # Timeout deserves an explicit error event — the user
-                        # likely waited 20s and is still owed a response.
+                        # likely waited the full window and is still owed a
+                        # response.
                         raise RuntimeError(
-                            f"MCP tools/list timed out after {_MCP_TOOLS_LOAD_TIMEOUT_S:.0f}s"
+                            f"MCP tools/list timed out after {tools_load_timeout_s:.0f}s"
                         ) from exc
                     except Exception as exc:
                         # MCP server unreachable / refusing the handshake /
@@ -299,6 +309,35 @@ class ChatService:
                     )
                 tool_registry = ToolRegistry(tools)
 
+                # Pull prior turns from this session so the LLM can resolve
+                # references ("the first one", "sort by name", "yes, delete")
+                # against the conversation it's actually in. Best-effort — a
+                # history-load failure logs and proceeds with an empty list
+                # rather than aborting the whole turn. `tmp-*` ids are unsaved
+                # sessions (history is by definition empty); skip the
+                # round-trip.
+                history_messages: list[Any] = []
+                if session_id and not session_id.startswith("tmp-"):
+                    try:
+                        rows = await self._history.list_messages(
+                            sid=user_context.sid,
+                            session=session_id,
+                            limit=20,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "chat_history_load_failed_using_empty",
+                            session_id=session_id,
+                            error_type=type(exc).__name__,
+                            error=str(exc)[:200],
+                        )
+                        rows = []
+                    for row in rows:
+                        if row["role"] == "user":
+                            history_messages.append(HumanMessage(content=row["content"]))
+                        else:
+                            history_messages.append(AIMessage(content=row["content"]))
+
                 # Unified agent loop. tool_call is a block type in the
                 # envelope; the loop drives the LLM via
                 # `with_structured_output(...).astream(...)` and yields
@@ -309,12 +348,13 @@ class ChatService:
                 with _tracer.start_as_current_span("agent.run") as run_span:
                     run_span.set_attribute("tool_count", len(tool_registry))
                     run_span.set_attribute("max_steps", max_steps)
+                    run_span.set_attribute("history_turns", len(history_messages))
                     async for ev in run_agent_loop(
                         llm=self._llm,
                         tool_registry=tool_registry,
                         user_message=message,
                         context_preamble=context_preamble,
-                        history=None,
+                        history=history_messages or None,
                         max_steps=max_steps,
                     ):
                         if ev["type"] == "tool_call":

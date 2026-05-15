@@ -10,13 +10,12 @@ the agent's actual emissions. `validate_event` runtime-checks an event
 dict against the union and raises `ValueError` on a mismatch — used by
 tests to catch contract drift without paying the cost on every emit.
 
-Seven event kinds (in emission order over a turn):
+Six event kinds (in emission order over a turn):
 
 - `session`       — `id: str`. First frame, always.
-- `status`        — `message: str`. Reserved; not currently emitted.
 - `tool_call`     — `name: str`, `arguments: dict`. One per agent tool invocation.
 - `content`       — `text: str`. Prose token chunks; streamed.
-- `content_block` — `block: dict`. Complete parsed `<ai-block>` payload.
+- `content_block` — `block: dict`. Complete parsed structured-block payload.
 - `error`         — `message: str`. Fatal; followed by `done`.
 - `done`          — `tools_called: list[str]`, `data_quality`, `timestamp: str`.
   Terminal frame; always last.
@@ -31,11 +30,6 @@ from typing import Any, Literal, TypedDict
 class SessionEvent(TypedDict):
     type: Literal["session"]
     id: str
-
-
-class StatusEvent(TypedDict):
-    type: Literal["status"]
-    message: str
 
 
 class ToolCallEvent(TypedDict):
@@ -68,7 +62,6 @@ class DoneEvent(TypedDict):
 
 SSEEvent = (
     SessionEvent
-    | StatusEvent
     | ToolCallEvent
     | ContentEvent
     | ContentBlockEvent
@@ -81,7 +74,6 @@ SSEEvent = (
 # the FE if it ever needs to mirror this validation client-side.
 _REQUIRED_FIELDS: dict[str, set[str]] = {
     "session": {"id"},
-    "status": {"message"},
     "tool_call": {"name", "arguments"},
     "content": {"text"},
     "content_block": {"block"},

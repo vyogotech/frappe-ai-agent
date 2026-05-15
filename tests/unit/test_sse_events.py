@@ -3,11 +3,6 @@ import pytest
 from ai_agent.transport.sse_events import serialize, validate_event
 
 
-def test_serialize_status_event():
-    event = {"type": "status", "message": "thinking..."}
-    assert serialize(event) == b'data: {"type":"status","message":"thinking..."}\n\n'
-
-
 def test_serialize_content_event():
     event = {"type": "content", "text": "Hello"}
     assert serialize(event) == b'data: {"type":"content","text":"Hello"}\n\n'
@@ -53,12 +48,11 @@ class TestValidateEvent:
     TypedDict contract. Tests cover every accepted shape plus the
     common drift modes."""
 
-    def test_accepts_all_seven_event_kinds(self):
+    def test_accepts_all_event_kinds(self):
         # Each kind, fully populated. Adding a new event type requires
         # updating this list AND the TypedDict above.
         valid_events = [
             {"type": "session", "id": "sess-1"},
-            {"type": "status", "message": "thinking"},
             {"type": "tool_call", "name": "list_invoices", "arguments": {"status": "unpaid"}},
             {"type": "content", "text": "hello"},
             {"type": "content_block", "block": {"type": "kpi", "metrics": []}},

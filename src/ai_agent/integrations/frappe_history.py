@@ -16,6 +16,7 @@ error we invalidate the cache so the next call re-fetches.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 from uuid import uuid4
@@ -168,6 +169,58 @@ class FrappeHistoryClient:
         if tool_result_json is not None:
             payload["tool_result_json"] = tool_result_json
         return await self._post_and_extract_name(url, payload, sid, "message")
+
+    async def list_messages(
+        self,
+        *,
+        sid: str,
+        session: str,
+        limit: int = 20,
+    ) -> list[dict[str, str]]:
+        """Return prior messages for `session`, oldest-first.
+
+        Each item is `{"role": "user"|"assistant", "content": "..."}`.
+        Best-effort: any failure returns an empty list so the loop can
+        proceed without history rather than abort.
+
+        `limit` bounds how many of the most recent rows we pull; we ask
+        Frappe to sort `creation desc` and reverse client-side because
+        Frappe REST doesn't expose an `asc` sort easily.
+        """
+        url = f"{self._base_url}/api/method/frappe.client.get_list"
+        params = {
+            "doctype": "AI Chat Message",
+            "fields": json.dumps(["role", "content"]),
+            "filters": json.dumps([["session", "=", session]]),
+            "order_by": "creation desc",
+            "limit_page_length": str(max(1, limit)),
+        }
+        try:
+            client = self._get_client()
+            resp = await client.get(url, params=params, cookies={"sid": sid})
+            if resp.status_code != 200:
+                logger.warning(
+                    "chat_history_list_failed",
+                    session=session,
+                    status_code=resp.status_code,
+                )
+                return []
+            data = resp.json().get("message") or []
+            rows = [
+                {"role": str(r.get("role", "")), "content": str(r.get("content", ""))}
+                for r in data
+                if r.get("role") in ("user", "assistant") and r.get("content")
+            ]
+            rows.reverse()  # oldest-first for LLM context
+            return rows
+        except Exception as exc:
+            logger.warning(
+                "chat_history_list_failed",
+                session=session,
+                error_type=type(exc).__name__,
+                error=str(exc)[:200],
+            )
+            return []
 
     # ---------------------------------------------------------------- #
     # internals
@@ -326,9 +379,17 @@ class FrappeHistoryClient:
 
 
 def _looks_like_csrf_error(response: httpx.Response) -> bool:
-    """Best-effort check for a Frappe CSRFTokenError response body."""
+    """Best-effort check for a Frappe CSRFTokenError response body.
+
+    Narrow the catch to the cases httpx can actually raise here:
+    `UnicodeDecodeError` when the body isn't valid text, and the
+    response-already-read or content-decoding errors httpx surfaces as
+    its own ResponseNotRead / DecodingError. Anything else (e.g. a
+    programming bug) should NOT be silently masked as "not a CSRF
+    error" — let it propagate so a real failure isn't hidden.
+    """
     try:
         text = response.text.lower()
-    except Exception:
+    except (UnicodeDecodeError, httpx.ResponseNotRead, httpx.DecodingError):
         return False
     return "csrf" in text
