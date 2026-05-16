@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from langchain_core.messages import BaseMessage
 
 from ai_agent.agent.loop import run_agent_loop
+from ai_agent.agent.leak_filter import StreamingLeakFilter
 from ai_agent.agent.prompts import build_system_prompt
 from ai_agent.agent.tool_registry import ToolRegistry
 from ai_agent.config import Settings
@@ -330,6 +331,14 @@ class ChatService:
                     run_span.set_attribute("tool_count", len(tool_registry))
                     run_span.set_attribute("max_steps", max_steps)
                     run_span.set_attribute("history_turns", len(history_messages))
+                    # Defense-in-depth: scan outgoing text chunks for
+                    # system-prompt leakage. The system prompt explicitly
+                    # forbids disclosure, but small instruct models can be
+                    # talked past that rule. If a leak is detected mid-stream,
+                    # we stop forwarding LLM output and emit a safe refusal.
+                    # See BUG-019 + tests/unit/test_leak_filter.py.
+                    leak_filter = StreamingLeakFilter()
+                    leak_triggered = False
                     async for ev in run_agent_loop(
                         llm=self._llm,
                         tool_registry=tool_registry,
@@ -338,12 +347,35 @@ class ChatService:
                         history=history_messages or None,
                         max_steps=max_steps,
                     ):
+                        if leak_triggered:
+                            # Drain remaining events without emitting them so
+                            # the LLM can complete the turn but the user only
+                            # sees the refusal we already published.
+                            continue
                         if ev["type"] == "tool_call":
                             tools_called.append(ev["name"])
                             tool_invocations.append({"name": ev["name"], "args": ev["arguments"]})
                         elif ev["type"] == "content_block":
                             block_events_emitted += 1
                         elif ev["type"] == "content":
+                            verdict = leak_filter.observe(ev.get("text", ""))
+                            if verdict.leaked:
+                                leak_triggered = True
+                                logger.warning(
+                                    "system_prompt_leak_suppressed",
+                                    session_id=session_id,
+                                    reason=verdict.reason,
+                                )
+                                # Replace whatever the model was streaming
+                                # with a safe refusal. The frontend appends
+                                # content chunks in arrival order; emitting
+                                # an `error` chunk would settle the stream
+                                # and discard text already published, so we
+                                # emit refusal text and a `done`.
+                                refusal = StreamingLeakFilter.SAFE_REFUSAL_MESSAGE
+                                assistant_text_parts.append("\n\n" + refusal)
+                                yield {"type": "content", "text": "\n\n" + refusal}
+                                continue
                             assistant_text_parts.append(ev["text"])
                         yield ev
 
