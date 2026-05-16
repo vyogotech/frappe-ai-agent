@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from ai_agent.agent.leak_filter import (
     StreamingLeakFilter,
     detect_system_prompt_leak,

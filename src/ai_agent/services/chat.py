@@ -37,8 +37,8 @@ from opentelemetry.trace import Status, StatusCode
 if TYPE_CHECKING:
     from langchain_core.messages import BaseMessage
 
-from ai_agent.agent.loop import run_agent_loop
 from ai_agent.agent.leak_filter import StreamingLeakFilter
+from ai_agent.agent.loop import run_agent_loop
 from ai_agent.agent.prompts import build_system_prompt
 from ai_agent.agent.tool_registry import ToolRegistry
 from ai_agent.config import Settings
