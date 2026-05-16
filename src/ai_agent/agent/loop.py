@@ -109,9 +109,7 @@ async def run_agent_loop(
                 or "<unknown>"
             )
             llm_model = (
-                getattr(llm, "model_name", None)
-                or getattr(llm, "model", None)
-                or "<unknown>"
+                getattr(llm, "model_name", None) or getattr(llm, "model", None) or "<unknown>"
             )
             logger.warning(
                 "agent_loop_llm_error",

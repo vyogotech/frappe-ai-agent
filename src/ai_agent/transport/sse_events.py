@@ -60,14 +60,7 @@ class DoneEvent(TypedDict):
     timestamp: str
 
 
-SSEEvent = (
-    SessionEvent
-    | ToolCallEvent
-    | ContentEvent
-    | ContentBlockEvent
-    | ErrorEvent
-    | DoneEvent
-)
+SSEEvent = SessionEvent | ToolCallEvent | ContentEvent | ContentBlockEvent | ErrorEvent | DoneEvent
 
 # Runtime-check schema: type → set of required field names (excluding "type"
 # itself). Kept as a plain dict so it's introspectable from tests and from
