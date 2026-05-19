@@ -42,3 +42,6 @@ docker-compose.dev.yml
 
 # Firecrawl scratch output
 .firecrawl/
+
+# Scanner output from `make audit`
+audit-out/
