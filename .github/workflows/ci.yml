@@ -82,9 +82,11 @@ jobs:
         with:
           python-version: ${{ env.FRAPPE_PY }}
 
+      # nopt@10 in frappe_ai's yarn tree needs >=22.22.2; 24 also meets
+      # frappe version-16's engines (>=24).
       - uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "24"
 
       # Stay on v5: setup-go@v6 sets GOTOOLCHAIN=local, which prevents
       # the auto-toolchain download Go 1.21+ does for go.mod files that
