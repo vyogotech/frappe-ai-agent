@@ -20,6 +20,7 @@ streaming splitter remain unchanged.
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from collections.abc import Iterator
@@ -34,6 +35,7 @@ __all__ = [
     "BLOCK_ENVELOPE_SCHEMA",
     "TOOL_CALL_TYPE",
     "UNIFIED_AGENT_SYSTEM_PROMPT",
+    "block_envelope_schema",
     "build_agent_messages",
     "envelope_to_markup",
     "iter_complete_blocks",
@@ -272,6 +274,26 @@ BLOCK_ENVELOPE_SCHEMA: dict = {
     "required": ["blocks"],
     "additionalProperties": False,
 }
+
+
+def block_envelope_schema(tool_names: set[str] | None = None) -> dict:
+    """`BLOCK_ENVELOPE_SCHEMA` with `tool_call.payload.name` pinned to `tool_names`.
+
+    The base schema types `name` as a bare string, so `""` is schema-valid and
+    unexecutable. Pinning the enum makes it unreachable at the token level.
+    An empty set returns the shared constant: `enum: []` admits no value and
+    Ollama then emits invalid JSON. Treat the result as read-only.
+    """
+    if not tool_names:
+        return BLOCK_ENVELOPE_SCHEMA
+    schema = copy.deepcopy(BLOCK_ENVELOPE_SCHEMA)
+    for block in schema["properties"]["blocks"]["items"]["oneOf"]:
+        if block["properties"]["type"].get("const") == TOOL_CALL_TYPE:
+            block["properties"]["payload"]["properties"]["name"] = {
+                "type": "string",
+                "enum": sorted(tool_names),
+            }
+    return schema
 
 
 _FENCE_OPEN = re.compile(r"^\s*```(?:json)?\s*", re.IGNORECASE)

@@ -357,3 +357,44 @@ class TestEventsFromBlock:
     def test_malformed_dropped_silently(self):
         evs = _events_from_block({"not_a_real": "block"})
         assert evs == []
+
+
+class TestStructuredOutputSchemaWiring:
+    """The loop must hand `with_structured_output` a registry-pinned schema."""
+
+    @staticmethod
+    def _name_schema(schema: dict) -> dict:
+        branch = next(
+            e
+            for e in schema["properties"]["blocks"]["items"]["oneOf"]
+            if e["properties"]["type"]["const"] == "tool_call"
+        )
+        return branch["properties"]["payload"]["properties"]["name"]
+
+    @pytest.mark.asyncio
+    async def test_tool_names_are_pinned_to_the_live_registry(self):
+        llm = _fake_llm_with_yields(
+            [[{"blocks": [{"type": "text", "payload": {"content": "ok"}}]}]]
+        )
+        registry = _FakeRegistry({"list_documents": "x", "get_document": "y"})
+        await _drain(run_agent_loop(llm=llm, tool_registry=registry, user_message="hi"))
+
+        schema, kwargs = llm.with_structured_output.call_args
+        assert kwargs["method"] == "json_schema"
+        assert self._name_schema(schema[0]) == {
+            "type": "string",
+            "enum": ["get_document", "list_documents"],
+        }
+
+    @pytest.mark.asyncio
+    async def test_empty_registry_leaves_name_unconstrained(self):
+        # MCP-down soft-degrade. `enum: []` is an unsatisfiable grammar and
+        # makes Ollama emit invalid JSON, so the empty case must stay a
+        # bare string.
+        llm = _fake_llm_with_yields(
+            [[{"blocks": [{"type": "text", "payload": {"content": "ok"}}]}]]
+        )
+        await _drain(run_agent_loop(llm=llm, tool_registry=_FakeRegistry(), user_message="hi"))
+
+        schema, _ = llm.with_structured_output.call_args
+        assert self._name_schema(schema[0]) == {"type": "string"}

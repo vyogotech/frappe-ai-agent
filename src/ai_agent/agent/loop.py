@@ -2,7 +2,7 @@
 
 ONE envelope schema, ONE system prompt, ONE custom loop. `tool_call` is a
 block type alongside text/table/chart/kpi/status_list. The loop drives
-the LLM via `with_structured_output(BLOCK_ENVELOPE_SCHEMA,
+the LLM via `with_structured_output(block_envelope_schema(...),
 method="json_schema")`, which routes to:
 
 - Ollama → `format=<schema>` (token-level grammar enforcement)
@@ -44,8 +44,8 @@ if TYPE_CHECKING:
     from ai_agent.agent.tool_registry import ToolRegistry
 
 from ai_agent.blocks.envelope import (
-    BLOCK_ENVELOPE_SCHEMA,
     TOOL_CALL_TYPE,
+    block_envelope_schema,
     build_agent_messages,
     envelope_to_markup,
     iter_complete_blocks,
@@ -80,7 +80,12 @@ async def run_agent_loop(
     Yields nothing for session/done/error — those are the orchestrator's
     job (see `services/chat.py`).
     """
-    structured_llm = llm.with_structured_output(BLOCK_ENVELOPE_SCHEMA, method="json_schema")
+    # Pin `tool_call.name` to the tools actually loaded this turn — see
+    # `block_envelope_schema`. A bare-string `name` lets small models emit
+    # `{"name": ""}`, which is schema-valid and unexecutable.
+    structured_llm = llm.with_structured_output(
+        block_envelope_schema(tool_registry.names()), method="json_schema"
+    )
     messages = build_agent_messages(
         user_message=user_message,
         tools_catalog=tool_registry.schemas(),

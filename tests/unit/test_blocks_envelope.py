@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import ClassVar
 
 import pytest
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -11,6 +12,7 @@ from ai_agent.blocks.envelope import (
     BLOCK_ENVELOPE_SCHEMA,
     TOOL_CALL_TYPE,
     UNIFIED_AGENT_SYSTEM_PROMPT,
+    block_envelope_schema,
     build_agent_messages,
     envelope_to_markup,
     iter_complete_blocks,
@@ -191,6 +193,87 @@ class TestToolCallBlock:
         payload_schema = tool_call_branch["properties"]["payload"]
         assert set(payload_schema["required"]) == {"name", "arguments"}
         assert payload_schema["additionalProperties"] is False
+
+
+class TestBlockEnvelopeSchemaBuilder:
+    """`block_envelope_schema` pins tool_call.name to the live tool set.
+
+    Motivation: the base schema types `name` as a bare string, so the
+    constrained-decoding grammar accepts `""`. granite4.2:8b emits
+    `{"name": "", "arguments": {"doctype": "Role"}}` — schema-valid,
+    unexecutable. The enum makes that unreachable at the token level.
+    """
+
+    NAMES: ClassVar[set[str]] = {"list_documents", "aggregate_documents", "get_document"}
+
+    @staticmethod
+    def _tool_call_branch(schema: dict) -> dict:
+        return next(
+            entry
+            for entry in schema["properties"]["blocks"]["items"]["oneOf"]
+            if entry["properties"]["type"]["const"] == "tool_call"
+        )
+
+    def test_pins_tool_call_name_to_enum(self):
+        name_schema = self._tool_call_branch(block_envelope_schema(self.NAMES))["properties"][
+            "payload"
+        ]["properties"]["name"]
+        assert name_schema == {"type": "string", "enum": sorted(self.NAMES)}
+
+    def test_empty_name_is_not_in_the_enum(self):
+        # The whole point: "" must be ungeneratable.
+        name_schema = self._tool_call_branch(block_envelope_schema(self.NAMES))["properties"][
+            "payload"
+        ]["properties"]["name"]
+        assert "" not in name_schema["enum"]
+
+    def test_enum_is_sorted_regardless_of_set_iteration_order(self):
+        # `names()` returns a set; PYTHONHASHSEED must not change the schema
+        # (an unstable schema defeats any provider-side prompt/grammar cache).
+        a = block_envelope_schema({"b_tool", "a_tool", "c_tool"})
+        b = block_envelope_schema({"c_tool", "b_tool", "a_tool"})
+        assert a == b
+        assert self._tool_call_branch(a)["properties"]["payload"]["properties"]["name"]["enum"] == [
+            "a_tool",
+            "b_tool",
+            "c_tool",
+        ]
+
+    def test_no_tools_returns_base_schema_unconstrained(self):
+        # MCP-down soft-degrade (services.chat) hands us an empty registry.
+        # An `enum: []` compiles to a grammar with no legal value and Ollama
+        # then emits invalid JSON (`{"name": }`), breaking every degraded turn.
+        for empty in (set(), None):
+            schema = block_envelope_schema(empty)
+            assert schema is BLOCK_ENVELOPE_SCHEMA
+            assert self._tool_call_branch(schema)["properties"]["payload"]["properties"][
+                "name"
+            ] == {"type": "string"}
+
+    def test_does_not_mutate_the_module_constant(self):
+        before = json.dumps(BLOCK_ENVELOPE_SCHEMA, sort_keys=True)
+        block_envelope_schema(self.NAMES)
+        assert json.dumps(BLOCK_ENVELOPE_SCHEMA, sort_keys=True) == before
+
+    def test_leaves_every_other_block_branch_untouched(self):
+        patched = block_envelope_schema(self.NAMES)
+        for btype in ("text", "table", "chart", "kpi", "status_list"):
+            got = next(
+                e
+                for e in patched["properties"]["blocks"]["items"]["oneOf"]
+                if e["properties"]["type"]["const"] == btype
+            )
+            want = next(
+                e
+                for e in BLOCK_ENVELOPE_SCHEMA["properties"]["blocks"]["items"]["oneOf"]
+                if e["properties"]["type"]["const"] == btype
+            )
+            assert got == want
+
+    def test_tool_call_branch_still_requires_name_and_arguments(self):
+        payload = self._tool_call_branch(block_envelope_schema(self.NAMES))["properties"]["payload"]
+        assert set(payload["required"]) == {"name", "arguments"}
+        assert payload["additionalProperties"] is False
 
 
 class TestBuildAgentMessages:
