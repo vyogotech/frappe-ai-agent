@@ -53,6 +53,12 @@ class TestBuildSystemPrompt:
         # "Never fabricate." (capitalised sentence start, not all-caps).
         assert "Never fabricate" in prompt
 
+    def test_denies_parametric_knowledge(self):
+        # "Never fabricate" alone left room for the model to answer a data
+        # question from pretraining instead of calling a tool.
+        prompt = build_system_prompt({})
+        assert "no prior knowledge of this database" in prompt
+
     def test_discovery_before_mutation_pattern_present(self):
         prompt = build_system_prompt({})
         # The discovery-before-mutation rule must be in the prompt so the LLM
