@@ -398,3 +398,72 @@ class TestStructuredOutputSchemaWiring:
 
         schema, _ = llm.with_structured_output.call_args
         assert self._name_schema(schema[0]) == {"type": "string"}
+
+
+class TestWordByWord:
+    @pytest.mark.asyncio
+    async def test_growing_text_is_sent_as_deltas(self):
+        llm = _fake_llm_with_yields(
+            [
+                [
+                    {"blocks": [{"type": "text", "payload": {"content": "The"}}]},
+                    {"blocks": [{"type": "text", "payload": {"content": "The meal"}}]},
+                    {
+                        "blocks": [
+                            {"type": "text", "payload": {"content": "The meal cap is 45 AUD."}}
+                        ]
+                    },
+                ]
+            ]
+        )
+        events = await _drain(
+            run_agent_loop(llm=llm, tool_registry=_FakeRegistry(), user_message="q")
+        )
+        assert [e["text"] for e in events] == ["The", " meal", " cap is 45 AUD."]
+
+    @pytest.mark.asyncio
+    async def test_structured_block_keeps_its_place_between_text(self):
+        kpi = {
+            "type": "kpi",
+            "payload": {"metrics": [{"label": "Cap", "value": 45, "format": "number"}]},
+        }
+        llm = _fake_llm_with_yields(
+            [
+                [
+                    {"blocks": [{"type": "text", "payload": {"content": "Here:"}}]},
+                    {"blocks": [{"type": "text", "payload": {"content": "Here:"}}, kpi]},
+                    {
+                        "blocks": [
+                            {"type": "text", "payload": {"content": "Here:"}},
+                            kpi,
+                            {"type": "text", "payload": {"content": "Done"}},
+                        ]
+                    },
+                ]
+            ]
+        )
+        events = await _drain(
+            run_agent_loop(llm=llm, tool_registry=_FakeRegistry(), user_message="q")
+        )
+        assert [e["type"] for e in events] == ["content", "content_block", "content"]
+        assert events[1]["block"]["type"] == "kpi"
+
+    @pytest.mark.asyncio
+    async def test_text_before_a_tool_call_stays_as_a_preamble(self):
+        call = {"type": "tool_call", "payload": {"name": "get_count", "arguments": {}}}
+        llm = _fake_llm_with_yields(
+            [
+                [
+                    {"blocks": [{"type": "text", "payload": {"content": "Let me check."}}]},
+                    {"blocks": [{"type": "text", "payload": {"content": "Let me check."}}, call]},
+                ],
+                [{"blocks": [{"type": "text", "payload": {"content": "It is 42."}}]}],
+            ]
+        )
+        events = await _drain(
+            run_agent_loop(
+                llm=llm, tool_registry=_FakeRegistry({"get_count": "42"}), user_message="q"
+            )
+        )
+        assert [e["type"] for e in events] == ["content", "tool_call", "content"]
+        assert events[2]["text"] == "\n\nIt is 42."

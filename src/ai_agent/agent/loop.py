@@ -31,7 +31,7 @@ detection (3x → terminate with a "no progress" text block).
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterator
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -48,7 +48,6 @@ from ai_agent.blocks.envelope import (
     block_envelope_schema,
     build_agent_messages,
     envelope_to_markup,
-    iter_complete_blocks,
 )
 from ai_agent.blocks.parser import parse_blocks
 
@@ -74,8 +73,8 @@ async def run_agent_loop(
 
     Events yielded (matching `transport.sse_events`):
       - `tool_call`  — once per tool the model invokes (before execution)
-      - `content`    — once per text block in the final envelope
-      - `content_block` — once per structured block in the final envelope
+      - `content`    — text as the model writes it, in deltas
+      - `content_block` — once per structured block, when it completes
 
     Yields nothing for session/done/error — those are the orchestrator's
     job (see `services/chat.py`).
@@ -94,15 +93,28 @@ async def run_agent_loop(
     )
 
     seen_calls: dict[tuple[str, str], int] = {}
+    spoke = False  # text sent in an earlier iteration; the next answer starts a paragraph
 
     for step in range(max_steps):
-        # Stream the iteration, buffering partial dicts. At stream end we
-        # decide whether it was a tool-calling iteration or the final one.
+        # Each snapshot holds the whole envelope so far. Text goes out as it grows while no
+        # tool_call has appeared; text written before a tool_call stays as a preamble. At
+        # stream end we decide whether it was a tool-calling iteration or the final one.
         last_partial: dict[str, Any] | None = None
+        sent: dict[int, int] = {}
+        emitted: set[int] = set()
+        live = True
+        emitted_any = False
         try:
             async for partial in structured_llm.astream(messages):
-                if isinstance(partial, dict):
-                    last_partial = partial
+                if not isinstance(partial, dict):
+                    continue
+                last_partial = partial
+                if live and any(_is_tool_call(b) for b in partial.get("blocks") or []):
+                    live = False
+                if live:
+                    for ev in _stream_events(partial, sent, emitted, final=False, lead=spoke):
+                        emitted_any = spoke = True
+                        yield ev
         except Exception as exc:
             # Surface the *endpoint* in the warning so a DNS/host
             # misconfig is one log line, not an unwound traceback. Attr
@@ -158,17 +170,10 @@ async def run_agent_loop(
             return
 
         if not tool_blocks:
-            # Final iteration — emit the buffered envelope as SSE events
-            # using iter_complete_blocks so the FE gets the same
-            # incremental render as a true astream replay.
-            state: dict[str, Any] = {}
-            emitted_any = False
-            for block in iter_complete_blocks(final_envelope, state, final=True):
-                if _is_tool_call(block):
-                    continue
-                for ev in _events_from_block(block):
-                    emitted_any = True
-                    yield ev
+            # Final iteration: send what the stream has not sent yet.
+            for ev in _stream_events(final_envelope, sent, emitted, final=True, lead=spoke):
+                emitted_any = spoke = True
+                yield ev
             if not emitted_any:
                 # All non-tool blocks were malformed and dropped by
                 # parse_blocks / envelope_to_markup. Surface a fallback.
@@ -245,6 +250,38 @@ async def run_agent_loop(
 
 def _is_tool_call(block: Any) -> bool:
     return isinstance(block, dict) and block.get("type") == TOOL_CALL_TYPE
+
+
+def _stream_events(
+    envelope: dict[str, Any],
+    sent: dict[int, int],
+    emitted: set[int],
+    *,
+    final: bool,
+    lead: bool,
+) -> Iterator[dict[str, Any]]:
+    """Events for what is new in `envelope`, walked in block order so a structured block keeps
+    its place between text. Text goes out as deltas (`sent` holds the characters already sent
+    per block); a structured block goes out once, when the next block has started or at the
+    end, since partial-JSON numbers are only known to be complete then."""
+    blocks = envelope.get("blocks")
+    if not isinstance(blocks, list):
+        return
+    for i, block in enumerate(blocks):
+        if not isinstance(block, dict) or _is_tool_call(block):
+            continue
+        if block.get("type") == "text":
+            text = (block.get("payload") or {}).get("content")
+            done = sent.get(i, 0)
+            if isinstance(text, str) and len(text) > done:
+                delta = text[done:]
+                if lead and not sent:
+                    delta = "\n\n" + delta
+                sent[i] = len(text)
+                yield {"type": "content", "text": delta}
+        elif i not in emitted and (final or i < len(blocks) - 1):
+            emitted.add(i)
+            yield from _events_from_block(block)
 
 
 def _events_from_block(block: dict[str, Any]) -> list[dict[str, Any]]:
