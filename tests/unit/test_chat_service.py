@@ -9,6 +9,7 @@ orchestration. Loop behaviour has its own test file.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -929,3 +930,39 @@ async def test_handle_message_aclose_mid_stream_does_not_raise():
             await agen.aclose()
         except RuntimeError as e:  # pragma: no cover
             pytest.fail(f"aclose raised: {e}")
+
+
+async def test_assistant_message_keeps_sources_and_blocks():
+    """Blocks and passages used to vanish on reload: the row kept only the joined text."""
+    service = _make_service()
+    fake_history = MagicMock()
+    fake_history.ensure_session = AsyncMock(side_effect=lambda *, name, **_: name)
+    fake_history.save_message = AsyncMock(return_value="msg-1")
+    service._history = fake_history
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(return_value=[])
+    item = {"file": "abc123", "seq": 0, "distance": 0.2, "content": "Meals capped."}
+    block = {"type": "kpi", "metrics": [{"label": "Cap", "value": 45, "format": "number"}]}
+    loop_events = [
+        {"type": "sources", "items": [item]},
+        {"type": "content", "text": "45 AUD."},
+        {"type": "content_block", "block": block},
+    ]
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.run_agent_loop", _loop_factory(loop_events)),
+    ):
+        events = await _drain(
+            service.handle_message(
+                message="cap?",
+                session_id="s-src",
+                context={},
+                user_context=UserContext(sid="abc123"),
+            )
+        )
+    from ai_agent.transport.sse_events import validate_event
+
+    for ev in events:
+        validate_event(ev)
+    saved = fake_history.save_message.call_args_list[-1].kwargs
+    assert json.loads(saved["tool_result_json"]) == {"sources": [item], "blocks": [block]}

@@ -136,6 +136,9 @@ class ChatService:
         # Final user-visible content (text blocks from the agent loop's
         # last iteration), accumulated for history persistence.
         assistant_text_parts: list[str] = []
+        # Kept with the assistant message so a reopened chat shows what the live one did.
+        sources_seen: list[dict[str, Any]] = []
+        blocks_seen: list[dict[str, Any]] = []
         block_events_emitted = 0
         failed = False
         error_message = ""
@@ -357,6 +360,9 @@ class ChatService:
                             tool_invocations.append({"name": ev["name"], "args": ev["arguments"]})
                         elif ev["type"] == "content_block":
                             block_events_emitted += 1
+                            blocks_seen.append(ev["block"])
+                        elif ev["type"] == "sources":
+                            sources_seen.extend(ev["items"])
                         elif ev["type"] == "content":
                             verdict = leak_filter.observe(ev.get("text", ""))
                             if verdict.leaked:
@@ -432,6 +438,11 @@ class ChatService:
                 except (TypeError, ValueError):
                     # Arguments weren't JSON-serialisable — drop them silently.
                     tool_args_json = None
+            tool_result_json = (
+                json.dumps({"sources": sources_seen, "blocks": blocks_seen})
+                if sources_seen or blocks_seen
+                else None
+            )
             try:
                 await self._history.save_message(
                     sid=user_context.sid,
@@ -439,6 +450,7 @@ class ChatService:
                     role="assistant",
                     content=assistant_content,
                     tool_args_json=tool_args_json,
+                    tool_result_json=tool_result_json,
                 )
             except Exception as exc:
                 logger.warning(

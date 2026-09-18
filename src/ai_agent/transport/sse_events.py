@@ -10,10 +10,12 @@ the agent's actual emissions. `validate_event` runtime-checks an event
 dict against the union and raises `ValueError` on a mismatch — used by
 tests to catch contract drift without paying the cost on every emit.
 
-Six event kinds (in emission order over a turn):
+Seven event kinds (in emission order over a turn):
 
 - `session`       — `id: str`. First frame, always.
 - `tool_call`     — `name: str`, `arguments: dict`. One per agent tool invocation.
+- `sources`       — `items: list[dict]`. The passages `search_knowledge_base` returned
+  (`file`, `seq`, `distance`, `content` cut to 300 chars); right after that tool runs.
 - `content`       — `text: str`. Prose token chunks; streamed.
 - `content_block` — `block: dict`. Complete parsed structured-block payload.
 - `error`         — `message: str`. Fatal; followed by `done`.
@@ -48,6 +50,11 @@ class ContentBlockEvent(TypedDict):
     block: dict[str, Any]
 
 
+class SourcesEvent(TypedDict):
+    type: Literal["sources"]
+    items: list[dict[str, Any]]
+
+
 class ErrorEvent(TypedDict):
     type: Literal["error"]
     message: str
@@ -60,7 +67,15 @@ class DoneEvent(TypedDict):
     timestamp: str
 
 
-SSEEvent = SessionEvent | ToolCallEvent | ContentEvent | ContentBlockEvent | ErrorEvent | DoneEvent
+SSEEvent = (
+    SessionEvent
+    | ToolCallEvent
+    | SourcesEvent
+    | ContentEvent
+    | ContentBlockEvent
+    | ErrorEvent
+    | DoneEvent
+)
 
 # Runtime-check schema: type → set of required field names (excluding "type"
 # itself). Kept as a plain dict so it's introspectable from tests and from
@@ -70,6 +85,7 @@ _REQUIRED_FIELDS: dict[str, set[str]] = {
     "tool_call": {"name", "arguments"},
     "content": {"text"},
     "content_block": {"block"},
+    "sources": {"items"},
     "error": {"message"},
     "done": {"tools_called", "data_quality", "timestamp"},
 }

@@ -467,3 +467,58 @@ class TestWordByWord:
         )
         assert [e["type"] for e in events] == ["content", "tool_call", "content"]
         assert events[2]["text"] == "\n\nIt is 42."
+
+
+class TestSources:
+    @pytest.mark.asyncio
+    async def test_knowledge_base_passages_become_a_sources_event(self):
+        call = {
+            "type": "tool_call",
+            "payload": {"name": "search_knowledge_base", "arguments": {"query": "meal"}},
+        }
+        # the registry's rendering of the live MCP reply: summary line, then the JSON array;
+        # the `[` in the query must not be taken for the array
+        passages = (
+            'Found 1 passage(s) for "meal [cap]"\n[{"content":"Meals capped at 45 AUD.",'
+            '"distance":0.21,"file":"abc123","seq":0}]'
+        )
+        llm = _fake_llm_with_yields(
+            [
+                [{"blocks": [call]}],
+                [{"blocks": [{"type": "text", "payload": {"content": "45 AUD."}}]}],
+            ]
+        )
+        events = await _drain(
+            run_agent_loop(
+                llm=llm,
+                tool_registry=_FakeRegistry({"search_knowledge_base": passages}),
+                user_message="q",
+            )
+        )
+        assert [e["type"] for e in events] == ["tool_call", "sources", "content"]
+        assert events[1]["items"] == [
+            {"file": "abc123", "seq": 0, "distance": 0.21, "content": "Meals capped at 45 AUD."}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_no_passages_means_no_sources_event(self):
+        call = {
+            "type": "tool_call",
+            "payload": {"name": "search_knowledge_base", "arguments": {"query": "pets"}},
+        }
+        llm = _fake_llm_with_yields(
+            [
+                [{"blocks": [call]}],
+                [{"blocks": [{"type": "text", "payload": {"content": "Not found."}}]}],
+            ]
+        )
+        events = await _drain(
+            run_agent_loop(
+                llm=llm,
+                tool_registry=_FakeRegistry(
+                    {"search_knowledge_base": 'Found 0 passage(s) for "pets" []'}
+                ),
+                user_message="q",
+            )
+        )
+        assert [e["type"] for e in events] == ["tool_call", "content"]

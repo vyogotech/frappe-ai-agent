@@ -31,6 +31,7 @@ detection (3x → terminate with a "no progress" text block).
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncGenerator, Iterator
 from typing import TYPE_CHECKING, Any
 
@@ -58,6 +59,8 @@ logger = structlog.get_logger(__name__)
 # many times in one turn, we bail out. Prevents infinite tool loops on a
 # model that's confused about how to use the result.
 _REPEAT_LIMIT = 3
+
+KB_TOOL = "search_knowledge_base"
 
 
 async def run_agent_loop(
@@ -230,6 +233,8 @@ async def run_agent_loop(
             if not isinstance(args, dict):
                 args = {}
             result = await tool_registry.ainvoke(name, args)
+            if name == KB_TOOL and (items := _passages(result)):
+                yield {"type": "sources", "items": items}
             result_lines.append(f"tool {name}({json.dumps(args, ensure_ascii=False)}) → {result}")
 
         # Replay the model's tool_call envelope as an AIMessage so the
@@ -250,6 +255,31 @@ async def run_agent_loop(
 
 def _is_tool_call(block: Any) -> bool:
     return isinstance(block, dict) and block.get("type") == TOOL_CALL_TYPE
+
+
+def _passages(result: str) -> list[dict[str, Any]]:
+    """The passages in the knowledge-base tool's reply: a `Found N passage(s) for "q"` line,
+    then the JSON array on a line of its own. Matched at a line start so a `[` in the quoted
+    query is not taken for the array; raw_decode stops at the array's end."""
+    match = re.search(r"^\[", result, re.MULTILINE)
+    if not match:
+        return []
+    try:
+        rows, _ = json.JSONDecoder().raw_decode(result, match.start())
+    except ValueError:
+        return []
+    if not isinstance(rows, list):
+        return []
+    return [
+        {
+            "file": r["file"],
+            "seq": r.get("seq", 0),
+            "distance": r.get("distance"),
+            "content": str(r.get("content", ""))[:300],
+        }
+        for r in rows
+        if isinstance(r, dict) and r.get("file")
+    ]
 
 
 def _stream_events(
