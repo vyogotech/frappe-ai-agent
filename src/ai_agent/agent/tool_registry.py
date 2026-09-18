@@ -111,9 +111,17 @@ class ToolRegistry:
             raw = await tool.ainvoke(args or {})
         except Exception as exc:
             return _exception_to_result(exc)
-        # MCP tools return strings or pydantic models; coerce uniformly.
+        # MCP tools return strings, pydantic models, or (langchain-mcp-adapters) a list of
+        # content blocks; coerce uniformly. Text blocks become their text: str() of the list
+        # handed the model a Python repr with block ids in it.
         if isinstance(raw, str):
             return raw
+        if (
+            isinstance(raw, list)
+            and raw
+            and all(isinstance(b, dict) and b.get("type") == "text" for b in raw)
+        ):
+            return "\n".join(str(b.get("text", "")) for b in raw)
         if hasattr(raw, "model_dump"):
             return json.dumps(raw.model_dump(), ensure_ascii=False)
         return str(raw)
