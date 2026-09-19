@@ -22,7 +22,8 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -113,6 +114,27 @@ class _DecodeUsage(AsyncCallbackHandler):
         return {"output_tokens": self.tokens, "output_seconds": round(self.nanos / 1e9, 3)}
 
 
+@contextmanager
+def _log_when_cancelled(
+    turn: dict[str, Any], tools_called: list[str], parts: list[str]
+) -> Iterator[None]:
+    """The caller hung up (Stop, relay timeout, killed worker): log the turn, then let it unwind.
+
+    Covers the whole turn, session creation included. It must not await or yield.
+    """
+    try:
+        yield
+    except (asyncio.CancelledError, GeneratorExit):
+        logger.info(
+            "chat_turn_cancelled",
+            session_id=turn["session_id"],
+            duration_ms=(time.perf_counter() - turn["t0"]) * 1000.0,
+            tools_called_count=len(tools_called),
+            content_chars=sum(len(p) for p in parts),
+        )
+        raise
+
+
 class ChatService:
     """Per-request agent invocation.
 
@@ -180,7 +202,11 @@ class ChatService:
         # 16.9s graph_run + 0.3s history writes". get_tracer returns a
         # ProxyTracer that defers to the global provider at use-time,
         # so this is a no-op when OTEL is disabled.
-        with _tracer.start_as_current_span("agent.chat_turn") as turn_span:
+        turn: dict[str, Any] = {"session_id": session_id, "t0": t0}
+        with (
+            _tracer.start_as_current_span("agent.chat_turn") as turn_span,
+            _log_when_cancelled(turn, tools_called, assistant_text_parts),
+        ):
             # Resolve / create the history session BEFORE the graph runs so
             # the user's message and the eventual assistant reply can both
             # be stored. If Frappe is unreachable, fall back to a
@@ -214,6 +240,7 @@ class ChatService:
                 )
 
             turn_span.set_attribute("session_id", session_id)
+            turn["session_id"] = session_id
 
             # Announce the session id so the frontend can remember it and
             # pass it back on subsequent messages in the same conversation.

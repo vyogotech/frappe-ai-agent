@@ -232,6 +232,7 @@ async def run_agent_loop(
             if seen_calls[key] >= _REPEAT_LIMIT:
                 repeated = True
         if repeated:
+            logger.warning("agent_loop_repeat_limit_reached", repeat_limit=_REPEAT_LIMIT)
             yield {
                 "type": "content",
                 "text": (
