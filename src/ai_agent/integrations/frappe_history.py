@@ -233,6 +233,8 @@ class FrappeHistoryClient:
             rows = []
             for r in data:
                 content = str(r.get("content") or "")
+                if r.get("role") == "assistant" and content.startswith("[error]"):
+                    continue  # a failed turn's error text was for the user, not an answer
                 if r.get("role") == "assistant":
                     content = _with_blocks(content, r.get("tool_result_json"))
                 if r.get("role") in ("user", "assistant") and content:
