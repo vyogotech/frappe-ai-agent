@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 from typing import Any
 from uuid import uuid4
 
@@ -75,7 +76,12 @@ class FrappeHistoryClient:
                 "FrappeHistoryClient is closed; build a new instance for further writes"
             )
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=self._timeout, follow_redirects=True)
+            # one client serves every user, so it must never keep the sid a response sets
+            self._client = httpx.AsyncClient(
+                timeout=self._timeout,
+                follow_redirects=True,
+                cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=[])),
+            )
         return self._client
 
     async def aclose(self) -> None:
@@ -197,7 +203,7 @@ class FrappeHistoryClient:
         }
         try:
             client = self._get_client()
-            resp = await client.get(url, params=params, cookies={"sid": sid})
+            resp = await client.get(url, params=params, headers={"Cookie": f"sid={sid}"})
             if resp.status_code != 200:
                 logger.warning(
                     "chat_history_list_failed",
