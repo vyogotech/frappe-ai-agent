@@ -6,16 +6,17 @@ import json
 from collections.abc import Callable
 from typing import Annotated, Any
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from slowapi import Limiter
 
-from ai_agent.middleware.sid import UserContext, extract_user_context
+from ai_agent.middleware.sid import UserContext, extract_user_context, signed_in_user
 from ai_agent.transport.sse_events import serialize
 
 
-def _require_sid(request: Request) -> UserContext:
+async def _require_sid(request: Request) -> UserContext:
     """Why: FastAPI Depends() runs before the @limiter.limit decorator's
     rate-limit check, so unauthenticated callers 401 without consuming a
     token from the (IP-keyed) bucket — preventing one bad actor from
@@ -24,6 +25,12 @@ def _require_sid(request: Request) -> UserContext:
     user_context = extract_user_context(request)
     if user_context is None:
         raise HTTPException(status_code=401, detail="Missing sid cookie")
+    try:
+        user = await signed_in_user(request.app.state.settings.frappe_url, user_context.sid)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=503, detail="Cannot check your session right now") from exc
+    if user is None:
+        raise HTTPException(status_code=401, detail="Not signed in")
     return user_context
 
 
