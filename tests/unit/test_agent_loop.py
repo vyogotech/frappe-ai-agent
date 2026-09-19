@@ -45,7 +45,7 @@ def _fake_llm_with_yields(iterations: list[list[dict[str, Any]]]) -> MagicMock:
     llm = MagicMock()
     iter_queue = list(iterations)
 
-    def _astream(_messages):
+    def _astream(_messages, config=None):
         if not iter_queue:
             raise RuntimeError("test: ran out of scripted iterations")
         partials = iter_queue.pop(0)
@@ -318,7 +318,7 @@ class TestEmptyEnvelopeDefense:
 class TestLLMError:
     @pytest.mark.asyncio
     async def test_llm_exception_propagates(self):
-        def _raising_astream(_messages):
+        def _raising_astream(_messages, config=None):
             async def _gen():
                 raise RuntimeError("provider down")
                 yield  # unreachable
@@ -522,3 +522,56 @@ class TestSources:
             )
         )
         assert [e["type"] for e in events] == ["tool_call", "content"]
+
+
+class TestChatScope:
+    @pytest.mark.asyncio
+    async def test_every_knowledge_search_is_scoped_to_this_chat(self):
+        """The model may write any session it likes; the agent's own chat id replaces it."""
+        call = {
+            "type": "tool_call",
+            "payload": {
+                "name": "search_knowledge_base",
+                "arguments": {"query": "code", "session": "not-mine"},
+            },
+        }
+        llm = _fake_llm_with_yields(
+            [[{"blocks": [call]}], [{"blocks": [{"type": "text", "payload": {"content": "ok"}}]}]]
+        )
+        registry = _FakeRegistry({"search_knowledge_base": "Found 0 passage(s)"})
+        await _drain(
+            run_agent_loop(llm=llm, tool_registry=registry, user_message="q", session="mine")
+        )
+        assert registry.calls == [("search_knowledge_base", {"query": "code", "session": "mine"})]
+
+    @pytest.mark.asyncio
+    async def test_an_attached_file_keeps_its_name_in_sources(self):
+        call = {
+            "type": "tool_call",
+            "payload": {"name": "search_knowledge_base", "arguments": {"query": "q"}},
+        }
+        passages = (
+            'Found 1 passage(s) for "q"\n'
+            '[{"content":"PELICAN-7","distance":0.1,"file":"f1","seq":0,'
+            '"file_name":"zephyr.txt","attachment":true}]'
+        )
+        llm = _fake_llm_with_yields(
+            [[{"blocks": [call]}], [{"blocks": [{"type": "text", "payload": {"content": "ok"}}]}]]
+        )
+        events = await _drain(
+            run_agent_loop(
+                llm=llm,
+                tool_registry=_FakeRegistry({"search_knowledge_base": passages}),
+                user_message="q",
+            )
+        )
+        assert events[1]["items"] == [
+            {
+                "file": "f1",
+                "seq": 0,
+                "distance": 0.1,
+                "content": "PELICAN-7",
+                "file_name": "zephyr.txt",
+                "attachment": True,
+            }
+        ]

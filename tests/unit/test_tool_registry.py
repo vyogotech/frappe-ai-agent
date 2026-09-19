@@ -168,3 +168,22 @@ class TestMcpContentBlocks:
         assert await ToolRegistry([_image]).ainvoke("_image", {}) == str(
             [{"type": "image", "data": "x"}]
         )
+
+
+class _SearchArgs(BaseModel):
+    query: str = Field(description="The question")
+    session: str = Field(default="", description="The chat")
+
+
+@tool("search_knowledge_base", args_schema=_SearchArgs)
+def _search(query: str, session: str = "") -> str:
+    """Search documents."""
+    return query
+
+
+def test_the_model_never_sees_the_chat_it_searches():
+    """The agent fills `session` with the chat the question came from; offering it to the
+    model would let it point a search at another chat."""
+    rendered = ToolRegistry([_search]).schemas()
+    assert "query" in rendered
+    assert "session" not in rendered

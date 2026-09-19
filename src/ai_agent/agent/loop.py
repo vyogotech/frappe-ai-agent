@@ -36,6 +36,7 @@ from collections.abc import AsyncGenerator, Iterator
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -71,6 +72,8 @@ async def run_agent_loop(
     context_preamble: str = "",
     history: list[BaseMessage] | None = None,
     max_steps: int = 25,
+    callbacks: list[BaseCallbackHandler] | None = None,
+    session: str | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Drive the unified-schema agent loop, yielding SSE-schema events.
 
@@ -108,7 +111,9 @@ async def run_agent_loop(
         live = True
         emitted_any = False
         try:
-            async for partial in structured_llm.astream(messages):
+            async for partial in structured_llm.astream(
+                messages, config={"callbacks": callbacks or []}
+            ):
                 if not isinstance(partial, dict):
                     continue
                 last_partial = partial
@@ -232,6 +237,9 @@ async def run_agent_loop(
             args = payload.get("arguments") or {}
             if not isinstance(args, dict):
                 args = {}
+            if name == KB_TOOL and session:
+                # the chat's own files are searched with it; whatever the model wrote is replaced
+                args = {**args, "session": session}
             result = await tool_registry.ainvoke(name, args)
             if name == KB_TOOL and (items := _passages(result)):
                 yield {"type": "sources", "items": items}
@@ -276,6 +284,8 @@ def _passages(result: str) -> list[dict[str, Any]]:
             "seq": r.get("seq", 0),
             "distance": r.get("distance"),
             "content": str(r.get("content", ""))[:300],
+            # a file attached in this chat: named here, since it is not in the user's Drive
+            **({"file_name": r["file_name"], "attachment": True} if r.get("attachment") else {}),
         }
         for r in rows
         if isinstance(r, dict) and r.get("file")

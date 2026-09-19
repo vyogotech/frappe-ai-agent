@@ -19,14 +19,15 @@ Seven event kinds (in emission order over a turn):
 - `content`       — `text: str`. Prose token chunks; streamed.
 - `content_block` — `block: dict`. Complete parsed structured-block payload.
 - `error`         — `message: str`. Fatal; followed by `done`.
-- `done`          — `tools_called: list[str]`, `data_quality`, `timestamp: str`.
+- `done`          — `tools_called: list[str]`, `data_quality`, `timestamp: str`, and
+  `usage` when the model reports its decode time.
   Terminal frame; always last.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 
 class SessionEvent(TypedDict):
@@ -65,6 +66,9 @@ class DoneEvent(TypedDict):
     tools_called: list[str]
     data_quality: Literal["high", "low"]
     timestamp: str
+    # Ollama's output_tokens and output_seconds, when the model reports them, and
+    # first_token_s: the seconds from the question to the first answer text
+    usage: NotRequired[dict[str, float]]
 
 
 SSEEvent = (

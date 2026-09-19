@@ -965,4 +965,71 @@ async def test_assistant_message_keeps_sources_and_blocks():
     for ev in events:
         validate_event(ev)
     saved = fake_history.save_message.call_args_list[-1].kwargs
-    assert json.loads(saved["tool_result_json"]) == {"sources": [item], "blocks": [block]}
+    kept = json.loads(saved["tool_result_json"])
+    assert kept.pop("usage").keys() == {"first_token_s"}  # the answer's text had a first moment
+    assert kept == {"sources": [item], "blocks": [block]}
+
+
+@pytest.mark.asyncio
+async def test_ollama_decode_counts_reach_done_and_history():
+    """Ollama times the tokens it writes; a turn's calls are summed so the UI can show tokens/s."""
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, LLMResult
+
+    def _factory(**kwargs):
+        async def _gen():
+            for tokens, nanos in ((100, 2_000_000_000), (50, 1_000_000_000)):
+                meta = {"eval_count": tokens, "eval_duration": nanos}
+                result = LLMResult(
+                    generations=[
+                        [ChatGeneration(message=AIMessage(content="", response_metadata=meta))]
+                    ]
+                )
+                for cb in kwargs["callbacks"]:
+                    await cb.on_llm_end(result)
+            yield {"type": "content", "text": "ok"}
+
+        return _gen()
+
+    service = _make_service()
+    service._history = MagicMock()
+    service._history.ensure_session = AsyncMock(side_effect=lambda *, name, **_: name)
+    service._history.save_message = AsyncMock(return_value="msg-1")
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(return_value=[])
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch("ai_agent.services.chat.run_agent_loop", _factory),
+    ):
+        events = await _drain(
+            service.handle_message(
+                message="hi", session_id="s1", context={}, user_context=UserContext(sid="abc123")
+            )
+        )
+
+    usage = events[-1]["usage"]
+    assert (usage["output_tokens"], usage["output_seconds"]) == (150, 3.0)
+    assert usage["first_token_s"] >= 0, "when the first answer text went out, after the turn began"
+    saved = service._history.save_message.call_args_list[-1].kwargs["tool_result_json"]
+    assert json.loads(saved)["usage"] == usage
+
+
+@pytest.mark.asyncio
+async def test_no_decode_timing_means_no_speed():
+    """Hosted providers report no decode time; the done event then claims no speed."""
+    mock_client = MagicMock()
+    mock_client.get_tools = AsyncMock(return_value=[])
+    with (
+        patch("ai_agent.services.chat.build_mcp_client_for_sid", return_value=mock_client),
+        patch(
+            "ai_agent.services.chat.run_agent_loop",
+            _loop_factory([{"type": "content", "text": "ok"}]),
+        ),
+    ):
+        events = await _drain(
+            _make_service().handle_message(
+                message="hi", session_id="s1", context={}, user_context=UserContext(sid="abc123")
+            )
+        )
+    # no speed without the model's own timing, but the first answer text still has a time
+    assert set(events[-1]["usage"]) == {"first_token_s"}

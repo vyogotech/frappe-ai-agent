@@ -29,8 +29,10 @@ from uuid import uuid4
 
 import httpx
 import structlog
+from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.outputs import LLMResult
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 
@@ -90,6 +92,27 @@ def _derive_title(message: str) -> str:
     return stripped[:_TITLE_MAX_LEN]
 
 
+class _DecodeUsage(AsyncCallbackHandler):
+    """Ollama's own count and timing of the tokens it writes, summed over a turn's model calls."""
+
+    def __init__(self) -> None:
+        self.tokens = 0
+        self.nanos = 0
+
+    async def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
+        for generations in response.generations:
+            for g in generations:
+                meta = getattr(getattr(g, "message", None), "response_metadata", None) or {}
+                self.tokens += meta.get("eval_count") or 0
+                self.nanos += meta.get("eval_duration") or 0
+
+    def summary(self) -> dict[str, float] | None:
+        # hosted providers report no decode time, and a speed without one would be a guess
+        if not self.nanos:
+            return None
+        return {"output_tokens": self.tokens, "output_seconds": round(self.nanos / 1e9, 3)}
+
+
 class ChatService:
     """Per-request agent invocation.
 
@@ -139,6 +162,9 @@ class ChatService:
         # Kept with the assistant message so a reopened chat shows what the live one did.
         sources_seen: list[dict[str, Any]] = []
         blocks_seen: list[dict[str, Any]] = []
+        decode = _DecodeUsage()
+        started = time.monotonic()
+        first_token: float | None = None  # seconds until the first answer text went out
         block_events_emitted = 0
         failed = False
         error_message = ""
@@ -349,6 +375,8 @@ class ChatService:
                         context_preamble=context_preamble,
                         history=history_messages or None,
                         max_steps=max_steps,
+                        callbacks=[decode],
+                        session=session_id,
                     ):
                         if leak_triggered:
                             # Drain remaining events without emitting them so
@@ -383,6 +411,8 @@ class ChatService:
                                 yield {"type": "content", "text": "\n\n" + refusal}
                                 continue
                             assistant_text_parts.append(ev["text"])
+                            if first_token is None:
+                                first_token = round(time.monotonic() - started, 3)
                         yield ev
 
             except Exception as exc:
@@ -438,9 +468,15 @@ class ChatService:
                 except (TypeError, ValueError):
                     # Arguments weren't JSON-serialisable — drop them silently.
                     tool_args_json = None
+            usage = (decode.summary() or {}) | (
+                {"first_token_s": first_token} if first_token is not None else {}
+            )
             tool_result_json = (
-                json.dumps({"sources": sources_seen, "blocks": blocks_seen})
-                if sources_seen or blocks_seen
+                json.dumps(
+                    {"sources": sources_seen, "blocks": blocks_seen}
+                    | ({"usage": usage} if usage else {})
+                )
+                if sources_seen or blocks_seen or usage
                 else None
             )
             try:
@@ -465,6 +501,7 @@ class ChatService:
                 "tools_called": tools_called,
                 "data_quality": "low" if failed else "high",
                 "timestamp": _utcnow_rfc3339_z(),
+                **({"usage": usage} if usage else {}),
             }
 
             # Final summary attributes on the chat_turn span — these are

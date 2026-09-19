@@ -127,6 +127,11 @@ class ToolRegistry:
         return str(raw)
 
 
+# Arguments the agent fills itself, never the model: a knowledge search is scoped to the chat
+# the question came from, and offering `session` would let the model aim it at another chat.
+AGENT_ARGS = {"search_knowledge_base": {"session"}}
+
+
 def _render_args_schema(tool: BaseTool) -> str:
     """Render a tool's argument schema as compact JSON for the prompt.
 
@@ -146,8 +151,9 @@ def _render_args_schema(tool: BaseTool) -> str:
             schema = dict(args_schema)
     except Exception:
         return "{}"
-    properties = schema.get("properties") or {}
-    required = set(schema.get("required") or [])
+    hidden = AGENT_ARGS.get(tool.name, set())
+    properties = {k: v for k, v in (schema.get("properties") or {}).items() if k not in hidden}
+    required = set(schema.get("required") or []) - hidden
     if not properties:
         return "{}"
     parts: list[str] = []
