@@ -67,6 +67,9 @@ class ToolRegistry:
         # Dedup-by-name (last-write-wins) — paranoia for MCP servers that
         # surface two tools with the same name across namespaces.
         self._by_name: dict[str, BaseTool] = {t.name: t for t in tools}
+        for t in tools:
+            # langchain-mcp-adapters 0.3 returns an MCP isError result as ordinary output
+            t.handle_tool_error = False
 
     def names(self) -> set[str]:
         return set(self._by_name)
