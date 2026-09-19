@@ -248,6 +248,36 @@ class ChatService:
             # brand-new AI Chat Session row.
             yield {"type": "session", "id": session_id}
 
+            # Read before the question is saved, so the history holds only earlier turns.
+            # Pull prior turns from this session so the LLM can resolve
+            # references ("the first one", "sort by name", "yes, delete")
+            # against the conversation it's actually in. Best-effort — a
+            # history-load failure logs and proceeds with an empty list
+            # rather than aborting the whole turn. `tmp-*` ids are unsaved
+            # sessions (history is by definition empty); skip the
+            # round-trip.
+            history_messages: list[BaseMessage] = []
+            if session_id and not session_id.startswith("tmp-"):
+                try:
+                    rows = await self._history.list_messages(
+                        sid=user_context.sid,
+                        session=session_id,
+                        limit=20,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "chat_history_load_failed_using_empty",
+                        session_id=session_id,
+                        error_type=type(exc).__name__,
+                        error=str(exc)[:200],
+                    )
+                    rows = []
+                for row in rows:
+                    if row["role"] == "user":
+                        history_messages.append(HumanMessage(content=row["content"]))
+                    else:
+                        history_messages.append(AIMessage(content=row["content"]))
+
             # Persist the user's message. Best-effort: a Frappe outage must
             # not abort the chat turn — log and continue.
             try:
@@ -344,35 +374,6 @@ class ChatService:
                         "Do not fabricate data."
                     )
                 tool_registry = ToolRegistry(tools)
-
-                # Pull prior turns from this session so the LLM can resolve
-                # references ("the first one", "sort by name", "yes, delete")
-                # against the conversation it's actually in. Best-effort — a
-                # history-load failure logs and proceeds with an empty list
-                # rather than aborting the whole turn. `tmp-*` ids are unsaved
-                # sessions (history is by definition empty); skip the
-                # round-trip.
-                history_messages: list[BaseMessage] = []
-                if session_id and not session_id.startswith("tmp-"):
-                    try:
-                        rows = await self._history.list_messages(
-                            sid=user_context.sid,
-                            session=session_id,
-                            limit=20,
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "chat_history_load_failed_using_empty",
-                            session_id=session_id,
-                            error_type=type(exc).__name__,
-                            error=str(exc)[:200],
-                        )
-                        rows = []
-                    for row in rows:
-                        if row["role"] == "user":
-                            history_messages.append(HumanMessage(content=row["content"]))
-                        else:
-                            history_messages.append(AIMessage(content=row["content"]))
 
                 # Unified agent loop. tool_call is a block type in the
                 # envelope; the loop drives the LLM via
