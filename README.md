@@ -135,7 +135,7 @@ All settings are loaded from environment or `.env` with the `AI_AGENT_` prefix. 
 |----------|---------|-------------|
 | `AI_AGENT_HOST` | `0.0.0.0` | Bind host |
 | `AI_AGENT_PORT` | `8484` | Bind port |
-| `AI_AGENT_WORKERS` | `1` | Uvicorn workers. Wired into the Dockerfile CMD as `uvicorn --workers ${AI_AGENT_WORKERS:-1}`. The agent is stateless per-request (history is fetched from Frappe each turn), so raising workers is safe — bottleneck is Ollama / hosted-LLM throughput. |
+| `AI_AGENT_WORKERS` | `1` | Uvicorn workers. Wired into the Dockerfile CMD as `uvicorn --workers ${AI_AGENT_WORKERS:-1}`. The agent is stateless per-request (history is fetched from Frappe each turn), but each worker keeps its own count for `AI_AGENT_AGENT_RATE_LIMIT`, so N workers let one session make N times that many requests. |
 | `AI_AGENT_CORS_ORIGINS` | `["http://localhost:8000"]` | JSON list of credentialed-CORS origins. `"*"` is not allowed because cookies are forwarded |
 | `AI_AGENT_LLM_PROVIDER` | `ollama` | `ollama`, `openai`, `anthropic`, `google` |
 | `AI_AGENT_LLM_BASE_URL` | `http://localhost:11434` | Provider base URL |
