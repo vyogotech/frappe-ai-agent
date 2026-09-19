@@ -1,0 +1,195 @@
+{
+  "$defs": {
+    "ContentBlockEvent": {
+      "properties": {
+        "block": {
+          "additionalProperties": true,
+          "title": "Block",
+          "type": "object"
+        },
+        "type": {
+          "const": "content_block",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "block"
+      ],
+      "title": "ContentBlockEvent",
+      "type": "object"
+    },
+    "ContentEvent": {
+      "properties": {
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "type": {
+          "const": "content",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "text"
+      ],
+      "title": "ContentEvent",
+      "type": "object"
+    },
+    "DoneEvent": {
+      "properties": {
+        "data_quality": {
+          "enum": [
+            "high",
+            "low"
+          ],
+          "title": "Data Quality",
+          "type": "string"
+        },
+        "timestamp": {
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "tools_called": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Tools Called",
+          "type": "array"
+        },
+        "type": {
+          "const": "done",
+          "title": "Type",
+          "type": "string"
+        },
+        "usage": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Usage",
+          "type": "object"
+        }
+      },
+      "required": [
+        "type",
+        "tools_called",
+        "data_quality",
+        "timestamp"
+      ],
+      "title": "DoneEvent",
+      "type": "object"
+    },
+    "ErrorEvent": {
+      "properties": {
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "type": {
+          "const": "error",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "message"
+      ],
+      "title": "ErrorEvent",
+      "type": "object"
+    },
+    "SessionEvent": {
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "session",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "id"
+      ],
+      "title": "SessionEvent",
+      "type": "object"
+    },
+    "SourcesEvent": {
+      "properties": {
+        "items": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "type": {
+          "const": "sources",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "items"
+      ],
+      "title": "SourcesEvent",
+      "type": "object"
+    },
+    "ToolCallEvent": {
+      "properties": {
+        "arguments": {
+          "additionalProperties": true,
+          "title": "Arguments",
+          "type": "object"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "type": {
+          "const": "tool_call",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "name",
+        "arguments"
+      ],
+      "title": "ToolCallEvent",
+      "type": "object"
+    }
+  },
+  "anyOf": [
+    {
+      "$ref": "#/$defs/SessionEvent"
+    },
+    {
+      "$ref": "#/$defs/ToolCallEvent"
+    },
+    {
+      "$ref": "#/$defs/SourcesEvent"
+    },
+    {
+      "$ref": "#/$defs/ContentEvent"
+    },
+    {
+      "$ref": "#/$defs/ContentBlockEvent"
+    },
+    {
+      "$ref": "#/$defs/ErrorEvent"
+    },
+    {
+      "$ref": "#/$defs/DoneEvent"
+    }
+  ]
+}
