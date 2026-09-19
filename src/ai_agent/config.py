@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from limits import parse_many
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -35,6 +36,13 @@ class Settings(BaseSettings):
     # workers is safe whenever the LLM/MCP backend can keep up.
     workers: int = 1
     cors_origins: list[str] = ["http://localhost:8000"]
+
+    @field_validator("agent_rate_limit")
+    @classmethod
+    def _rate_limit_parses(cls, v: str) -> str:
+        # slowapi stops limiting on a string it cannot read, so refuse one at startup
+        parse_many(v)
+        return v
 
     @field_validator("cors_origins")
     @classmethod
