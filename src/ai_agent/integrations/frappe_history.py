@@ -47,6 +47,24 @@ _CSRF_PATTERN = re.compile(r'csrf_token\s*=\s*"([0-9a-fA-F]+)"')
 _DEFAULT_TIMEOUT = 10.0
 
 
+# ponytail: a big table is cut here; the general answer is the tool-output ceiling, P14
+_BLOCKS_CHARS = 4000
+
+
+def _with_blocks(text: str, tool_result_json: Any) -> str:
+    """The answer as the user saw it: its text, then the blocks it showed (a table, a chart), which
+    "the first one" or "sort that by name" in the next question point at."""
+    try:
+        blocks = json.loads(tool_result_json or "{}").get("blocks") or []
+    except (ValueError, AttributeError):
+        return text
+    if not blocks:
+        return text
+    shown = json.dumps({"blocks": blocks}, separators=(",", ":"), ensure_ascii=False)
+    shown = shown[:_BLOCKS_CHARS]
+    return f"{text}\n\n{shown}" if text else shown
+
+
 class FrappeHistoryClient:
     def __init__(self, base_url: str, timeout: float = _DEFAULT_TIMEOUT):
         self._base_url = base_url.rstrip("/")
@@ -196,7 +214,7 @@ class FrappeHistoryClient:
         url = f"{self._base_url}/api/method/frappe.client.get_list"
         params = {
             "doctype": "AI Chat Message",
-            "fields": json.dumps(["role", "content"]),
+            "fields": json.dumps(["role", "content", "tool_result_json"]),
             "filters": json.dumps([["session", "=", session]]),
             "order_by": "creation desc",
             "limit_page_length": str(max(1, limit)),
@@ -212,11 +230,13 @@ class FrappeHistoryClient:
                 )
                 return []
             data = resp.json().get("message") or []
-            rows = [
-                {"role": str(r.get("role", "")), "content": str(r.get("content", ""))}
-                for r in data
-                if r.get("role") in ("user", "assistant") and r.get("content")
-            ]
+            rows = []
+            for r in data:
+                content = str(r.get("content") or "")
+                if r.get("role") == "assistant":
+                    content = _with_blocks(content, r.get("tool_result_json"))
+                if r.get("role") in ("user", "assistant") and content:
+                    rows.append({"role": str(r["role"]), "content": content})
             rows.reverse()  # oldest-first for LLM context
             return rows
         except Exception as exc:
