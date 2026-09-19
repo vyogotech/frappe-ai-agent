@@ -1,8 +1,19 @@
 from __future__ import annotations
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from httpx import ASGITransport, AsyncClient
+
+from ai_agent.middleware.sid import UserContext, extract_user_context
+from ai_agent.transport.sse import _require_sid
+
+
+def _any_sid(request: Request) -> UserContext:
+    """Stands in for Frappe's session check: these tests are about the route, not sign-in."""
+    user_context = extract_user_context(request)
+    if user_context is None:
+        raise HTTPException(status_code=401, detail="Missing sid cookie")
+    return user_context
 
 
 class FakeChatService:
@@ -25,6 +36,7 @@ def _build_app() -> FastAPI:
     app = FastAPI()
     app.state.chat_service = FakeChatService()
     app.include_router(create_sse_router())
+    app.dependency_overrides[_require_sid] = _any_sid
     return app
 
 
@@ -127,6 +139,7 @@ async def test_sse_chat_route_no_sid_does_not_burn_rate_limit():
         agent_rate_limit="2/minute",
     )
     app = create_app(settings)
+    app.dependency_overrides[_require_sid] = _any_sid
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
@@ -152,6 +165,7 @@ async def test_sse_chat_route_rate_limits_after_burst():
         agent_rate_limit="2/minute",
     )
     app = create_app(settings)
+    app.dependency_overrides[_require_sid] = _any_sid
 
     async with AsyncClient(
         transport=ASGITransport(app=app),

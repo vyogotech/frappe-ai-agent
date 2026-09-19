@@ -11,11 +11,21 @@ import asyncio
 from typing import Any
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from httpx import ASGITransport, AsyncClient
 from pytest_bdd import given, parsers, scenarios, then, when
 
-from ai_agent.transport.sse import create_sse_router
+from ai_agent.middleware.sid import UserContext, extract_user_context
+from ai_agent.transport.sse import _require_sid, create_sse_router
+
+
+def _any_sid(request: Request) -> UserContext:
+    """Stands in for Frappe's session check: the scenarios test the route, not sign-in."""
+    user_context = extract_user_context(request)
+    if user_context is None:
+        raise HTTPException(status_code=401, detail="Missing sid cookie")
+    return user_context
+
 
 scenarios("../chat.feature")
 
@@ -38,6 +48,7 @@ def ctx() -> dict[str, Any]:
     app = FastAPI()
     app.state.chat_service = stub
     app.include_router(create_sse_router())
+    app.dependency_overrides[_require_sid] = _any_sid
     return {
         "app": app,
         "stub": stub,
