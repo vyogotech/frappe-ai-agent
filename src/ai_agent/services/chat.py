@@ -270,12 +270,10 @@ class ChatService:
                         root: BaseException = exc
                         while isinstance(root, BaseExceptionGroup) and root.exceptions:
                             root = root.exceptions[0]
-                        sid_prefix = user_context.sid[:8] if user_context.sid else None
                         tools_unavailable_reason = _tools_unavailable_message(root)
                         logger.warning(
                             "chat_tools_load_failed_soft_degrade",
                             session_id=session_id,
-                            sid_prefix=sid_prefix,
                             mcp_url=self._settings.mcp_server_url,
                             error_type=type(root).__name__,
                             error=str(root)[:200],

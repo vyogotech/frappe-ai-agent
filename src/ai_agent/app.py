@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from contextlib import asynccontextmanager
 
 import structlog
@@ -41,7 +42,8 @@ def _sid_or_ip_key(request: Request) -> str:
     # below) is a false positive. nosem suppressions kept on the same lines.
     sid = request.cookies.get("sid")
     if sid and sid.strip():
-        return "sid:" + sid  # nosem
+        # slowapi logs this key on every 429, so it must not be the credential itself
+        return "sid:" + hashlib.sha256(sid.encode()).hexdigest()  # nosem
     return "ip:" + get_remote_address(request)  # nosem
 
 
