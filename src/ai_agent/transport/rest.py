@@ -26,6 +26,8 @@ def create_rest_router(
             "llm_provider": settings.llm_provider,
             "llm_model": settings.llm_model,
             "llm_base_url": settings.llm_base_url,
+            # the context window it asks Ollama for; hosted providers set their own
+            "llm_num_ctx": settings.llm_num_ctx,
             "mcp_server_url": settings.mcp_server_url,
         }
 

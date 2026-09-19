@@ -59,3 +59,4 @@ class TestConfigEndpoint:
         assert resp.status_code == 200
         data = resp.json()
         assert data["llm_model"] == "qwen3.5:9b"
+        assert data["llm_num_ctx"] == 16384
