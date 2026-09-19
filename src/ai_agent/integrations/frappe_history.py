@@ -248,10 +248,15 @@ class FrappeHistoryClient:
         # outside the try so use-after-close raises cleanly.
         client = self._get_client()
         try:
-            response = await client.get(
-                url,
-                headers={"Cookie": f"sid={sid}"},
-            )
+            # httpx rebuilds a redirect's cookies from the jar, which keeps none, so each hop
+            # (Frappe 16 sends /app on to /desk) is followed here with the sid
+            for _ in range(5):
+                response = await client.get(
+                    url, headers={"Cookie": f"sid={sid}"}, follow_redirects=False
+                )
+                if response.next_request is None:
+                    break
+                url = str(response.next_request.url)
             response.raise_for_status()
             # Frappe responds 200 + 302→/login when the sid is missing /
             # expired / belongs to Guest, and httpx silently follows the
