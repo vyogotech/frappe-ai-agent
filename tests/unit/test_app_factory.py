@@ -106,4 +106,6 @@ class TestCreateApp:
             "client": ("203.0.113.42", 12345),
         }
         key_sid = _sid_or_ip_key(Request(scope_with_sid))  # type: ignore[arg-type]
-        assert key_sid == "sid:real-sid-value"
+        # slowapi logs the key on every 429, so it holds a digest of the sid, never the sid
+        assert key_sid.startswith("sid:")
+        assert "real-sid-value" not in key_sid
