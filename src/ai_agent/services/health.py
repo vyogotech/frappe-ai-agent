@@ -36,7 +36,7 @@ class HealthService:
                 return {"ok": resp.status_code == 200}
         except Exception as e:
             logger.warning("mcp_health_failed", error=str(e))
-            return {"ok": False, "error": str(e)}
+            return {"ok": False}
 
     async def _check_llm(self) -> dict[str, Any]:
         # Only Ollama exposes `/api/tags`. Hosted providers (OpenAI, Anthropic,
@@ -53,4 +53,4 @@ class HealthService:
                 return {"ok": resp.status_code == 200}
         except Exception as e:
             logger.warning("llm_health_failed", error=str(e))
-            return {"ok": False, "error": str(e)}
+            return {"ok": False}
