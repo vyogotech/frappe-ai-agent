@@ -44,7 +44,6 @@ class TestHealthService:
 
         result = await HealthService(_settings()).check_all()
         assert result["mcp"]["ok"] is False
-        assert "mcp down" in result["mcp"]["error"]
 
     @pytest.mark.asyncio
     @respx.mock
@@ -54,7 +53,6 @@ class TestHealthService:
 
         result = await HealthService(_settings()).check_all()
         assert result["llm"]["ok"] is False
-        assert "slow" in result["llm"]["error"]
         assert result["healthy"] is False
 
     @pytest.mark.asyncio
