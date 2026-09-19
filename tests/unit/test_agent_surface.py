@@ -14,6 +14,7 @@ async def test_no_interactive_docs():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         assert (await ac.get("/docs")).status_code == 404
         assert (await ac.get("/redoc")).status_code == 404
+        assert (await ac.get("/openapi.json")).status_code == 404
 
 
 @respx.mock

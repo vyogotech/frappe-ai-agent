@@ -96,8 +96,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         title="Frappe AI Agent",
         version="0.1.0",
         lifespan=lifespan,
-        docs_url=None,
-        redoc_url=None,
+        openapi_url=None,
     )
 
     # slowapi: register the 429 handler. Why no SlowAPIMiddleware: the
