@@ -376,9 +376,10 @@ Each block is one of: tool_call | text | table | chart | kpi | status_list.
 - To fetch data: emit a `tool_call` block. The system runs the tool and
   replies with the result in the next user-role message; you then emit
   another envelope (more tool calls, or your final answer).
-- To answer the user: emit text/table/chart/kpi/status_list blocks. Once
-  ANY non-tool-call block appears in your response, the loop ends and
-  those blocks become the answer rendered to the user.
+- To answer the user: emit text/table/chart/kpi/status_list blocks. A
+  response with no tool_call block ends the loop, and its blocks are the
+  answer rendered to the user. Blocks beside a tool_call are shown to the
+  user too, before the tool runs.
 
 ## Block payloads
 

@@ -209,9 +209,13 @@ async def run_agent_loop(
                 }
             return
 
-        # Tool-calling iteration. Emit synthetic tool_call SSE events so
-        # the FE can render "fetching..." UI, then execute each tool and
-        # feed results back into the message list.
+        # Tool-calling iteration. The envelope is replayed to the model below as if the user saw all
+        # of it, so first send the blocks beside the tool calls that streaming stopped short of.
+        for ev in _stream_events(final_envelope, sent, emitted, final=True, lead=spoke):
+            spoke = True
+            yield ev
+        # Emit synthetic tool_call SSE events so the FE can render "fetching..." UI, then execute
+        # each tool and feed results back into the message list.
         for tb in tool_blocks:
             payload = tb.get("payload") or {}
             name = str(payload.get("name") or "")
