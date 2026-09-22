@@ -28,15 +28,7 @@ logger = structlog.get_logger()
 
 
 def _sid_or_ip_key(request: Request) -> str:
-    """Key function for slowapi — prefer caller's sid, fall back to IP.
-
-    Why: the chat route 401s without a sid, so sid will normally be present.
-    The IP fallback covers any future endpoints we decorate.
-
-    The returned string is a rate-limit bucket id consumed by slowapi
-    internally — it is never rendered to a browser, so the Flask-route
-    XSS rule semgrep flags here doesn't apply.
-    """
+    """Key function for slowapi — prefer caller's sid, fall back to IP."""
     # slowapi rate-limit key — return value is never rendered to a client,
     # so semgrep's Flask directly-returned-format-string rule (which fires
     # below) is a false positive. nosem suppressions kept on the same lines.
@@ -48,7 +40,6 @@ def _sid_or_ip_key(request: Request) -> str:
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
-    """Create the FastAPI application."""
     if settings is None:
         settings = Settings()
 

@@ -1,21 +1,4 @@
-"""Per-request chat orchestration.
-
-`ChatService` holds the long-lived pieces (settings, llm, and a system-
-prompt builder) and builds a fresh MCP client + tool registry per call
-to `handle_message`. Every request uses the caller's sid to authenticate
-with the MCP server so tool calls run under that Frappe user's
-permissions.
-
-The agent execution itself runs through `ai_agent.agent.loop.run_agent_loop`,
-which drives a unified envelope schema (tool_call is a block type) via
-`llm.with_structured_output(...).astream(...)`.
-
-Events yielded here must match the SSE schema in `transport.sse_events`:
-`session` (announced first), `tool_call`, `content`, `content_block`,
-`error`, `done`.
-
-Chat history is persisted best-effort to Frappe via `FrappeHistoryClient`.
-"""
+"""A chat turn per request, its MCP client built with the caller's sid so tools run as them."""
 
 from __future__ import annotations
 
@@ -63,13 +46,7 @@ _TITLE_MAX_LEN = 60
 
 
 def _tools_unavailable_message(root: BaseException) -> str:
-    """Map a tool-load root cause to a user-facing SSE error string.
-
-    Three buckets — the structured warning log carries the exact
-    type + message for operators; this string is what reaches the FE
-    bubble. Picked so the user can tell "the server is down" from
-    "my session expired" without reading exception classes.
-    """
+    """Map a tool-load root cause to a user-facing SSE error string."""
     if isinstance(root, httpx.HTTPStatusError):
         status = root.response.status_code
         if status in (401, 403):
@@ -86,7 +63,6 @@ def _utcnow_rfc3339_z() -> str:
 
 
 def _derive_title(message: str) -> str:
-    """First ~60 chars of the user's message, trimmed, for session title."""
     stripped = message.strip()
     if len(stripped) <= _TITLE_MAX_LEN:
         return stripped
@@ -118,10 +94,7 @@ class _DecodeUsage(AsyncCallbackHandler):
 def _log_when_cancelled(
     turn: dict[str, Any], tools_called: list[str], parts: list[str]
 ) -> Iterator[None]:
-    """The caller hung up (Stop, relay timeout, killed worker): log the turn, then let it unwind.
-
-    Covers the whole turn, session creation included. It must not await or yield.
-    """
+    """Log a turn the caller dropped (Stop, timeout, killed worker); it must not await or yield."""
     try:
         yield
     except (asyncio.CancelledError, GeneratorExit):
@@ -136,11 +109,7 @@ def _log_when_cancelled(
 
 
 class ChatService:
-    """Per-request agent invocation.
-
-    Instances are shared across requests but carry no per-user state. The
-    per-request graph + MCP client are built inside `handle_message`.
-    """
+    """Shared by every request and holds no per-user state: each turn builds its own MCP client."""
 
     def __init__(
         self,
@@ -156,11 +125,7 @@ class ChatService:
         self._history = history or FrappeHistoryClient(base_url=settings.frappe_url)
 
     async def aclose(self) -> None:
-        """Release any owned async resources (HTTP connection pools, etc.).
-
-        Called from the FastAPI lifespan teardown so the FrappeHistoryClient's
-        shared AsyncClient drops its sockets before the process exits.
-        """
+        """Release any owned async resources (HTTP connection pools, etc.)."""
         await self._history.aclose()
 
     async def handle_message(
@@ -171,11 +136,7 @@ class ChatService:
         context: dict[str, Any],
         user_context: UserContext,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        """Run the graph for one message, yielding SSE-schema events.
-
-        Returns an AsyncGenerator (not AsyncIterator) so callers can call
-        aclose() to cancel the stream cleanly on client disconnect.
-        """
+        """Yield one turn's SSE events; an AsyncGenerator, so aclose() can stop it on disconnect."""
         tools_called: list[str] = []
         tool_invocations: list[dict[str, Any]] = []
         # Final user-visible content (text blocks from the agent loop's

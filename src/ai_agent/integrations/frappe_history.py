@@ -1,18 +1,4 @@
-"""Frappe REST client for chat history persistence.
-
-Writes AI Chat Session / AI Chat Message DocTypes on behalf of the caller by
-forwarding the caller's Frappe sid cookie. Errors are swallowed and logged —
-a Frappe outage must NOT abort the conversation.
-
-CSRF handling: Frappe protects state-changing REST endpoints with a CSRF
-token. The token is embedded as a JS variable inside the rendered `/app`
-HTML page (`csrf_token = "<hex>"`), NOT as a response header. Verified
-against Frappe v15 (which CI pins via FRAPPE_BRANCH: version-15); the
-same pattern is reported on v16, but we test only v15. We GET `/app`,
-regex out the token, cache it per sid, and attach it as
-`X-Frappe-CSRF-Token` on every write. If a write fails with a CSRF
-error we invalidate the cache so the next call re-fetches.
-"""
+"""Best-effort Frappe REST client for chat history: a Frappe outage never aborts the chat."""
 
 from __future__ import annotations
 
@@ -49,8 +35,7 @@ _BLOCKS_CHARS = 4000
 
 
 def _with_blocks(text: str, tool_result_json: Any) -> str:
-    """The answer as the user saw it: its text, then the blocks it showed (a table, a chart), which
-    "the first one" or "sort that by name" in the next question point at."""
+    """The answer as shown, blocks included: a follow-up such as "the first one" points at them."""
     try:
         blocks = json.loads(tool_result_json or "{}").get("blocks") or []
     except (ValueError, AttributeError):
@@ -90,13 +75,7 @@ class FrappeHistoryClient:
         return self._client
 
     async def aclose(self) -> None:
-        """Close the underlying AsyncClient. Idempotent.
-
-        Called from the FastAPI lifespan teardown; safe to call multiple
-        times (lifespan exit may run after a context manager already
-        cleaned up). After aclose the instance is unusable — a fresh
-        instance must be built for any further writes.
-        """
+        """Close the pooled client; idempotent, and the instance is unusable afterwards."""
         if self._closed:
             return
         self._closed = True
@@ -111,15 +90,7 @@ class FrappeHistoryClient:
         title: str,
         context_json: str,
     ) -> str | None:
-        """Create an AI Chat Session owned by the caller.
-
-        Returns the created document's name, or None on any failure.
-
-        The AI Chat Session DocType is declared ``autoname: "prompt"`` —
-        Frappe requires callers to supply the row's primary key. Generate a
-        UUID-based name here so the resulting id is opaque to the user and
-        collision-free across concurrent first turns.
-        """
+        """Create an AI Chat Session, named here as autoname is "prompt"; None on any failure."""
         url = f"{self._base_url}{_SESSION_URL_PATH}"
         payload = {
             "name": f"chat-{uuid4().hex}",
@@ -136,14 +107,7 @@ class FrappeHistoryClient:
         title: str,
         context_json: str,
     ) -> str | None:
-        """Ensure an AI Chat Session with this exact ``name`` exists.
-
-        Used when the caller supplies a conversation id (e.g. forwarded by
-        Frappe from the browser) — subsequent message writes' Link validation
-        would 417 against a missing parent row. We attempt to create with the
-        explicit ``name`` field; a duplicate-name conflict means the session
-        is already there from an earlier turn, which is success.
-        """
+        """Ensure session `name` exists: a message's Link check fails without its row."""
         url = f"{self._base_url}{_SESSION_URL_PATH}"
         payload = {"name": name, "title": title, "context_json": context_json}
         result = await self._post_and_extract_name(url, payload, sid, "session")
@@ -163,10 +127,7 @@ class FrappeHistoryClient:
         tool_args_json: str | None = None,
         tool_result_json: str | None = None,
     ) -> str | None:
-        """Create an AI Chat Message linked to the given session.
-
-        Returns the created document's name, or None on any failure.
-        """
+        """Create an AI Chat Message linked to the given session; None on any failure."""
         url = f"{self._base_url}{_MESSAGE_URL_PATH}"
         payload: dict[str, Any] = {
             "session": session,
@@ -188,16 +149,7 @@ class FrappeHistoryClient:
         session: str,
         limit: int = 20,
     ) -> list[dict[str, str]]:
-        """Return prior messages for `session`, oldest-first.
-
-        Each item is `{"role": "user"|"assistant", "content": "..."}`.
-        Best-effort: any failure returns an empty list so the loop can
-        proceed without history rather than abort.
-
-        `limit` bounds how many of the most recent rows we pull; we ask
-        Frappe to sort `creation desc` and reverse client-side because
-        Frappe REST doesn't expose an `asc` sort easily.
-        """
+        """The last `limit` messages of `session`, oldest first; [] on any failure."""
         url = f"{self._base_url}/api/method/frappe.client.get_list"
         params = {
             "doctype": "AI Chat Message",
@@ -242,16 +194,7 @@ class FrappeHistoryClient:
     # ---------------------------------------------------------------- #
 
     async def _fetch_csrf_token(self, sid: str) -> str | None:
-        """GET /app and extract the CSRF token from the rendered HTML.
-
-        Frappe embeds the token as `csrf_token = "<hex>"` inline in the
-        desk page JavaScript (verified on v15 in the integration CI).
-        Following redirects lets us land on the real desk page even if
-        /app redirects.
-
-        Returns None on any failure so callers can still attempt the write
-        (Frappe will return a clear 400 CSRFTokenError we log downstream).
-        """
+        """The CSRF token inlined in the desk page (Frappe sends no header); None on any failure."""
         url = f"{self._base_url}{_CSRF_URL_PATH}"
         # Same closed-check positioning as _post_and_extract_name:
         # outside the try so use-after-close raises cleanly.
@@ -374,15 +317,7 @@ class FrappeHistoryClient:
 
 
 def _looks_like_csrf_error(response: httpx.Response) -> bool:
-    """Best-effort check for a Frappe CSRFTokenError response body.
-
-    Narrow the catch to the cases httpx can actually raise here:
-    `UnicodeDecodeError` when the body isn't valid text, and the
-    response-already-read or content-decoding errors httpx surfaces as
-    its own ResponseNotRead / DecodingError. Anything else (e.g. a
-    programming bug) should NOT be silently masked as "not a CSRF
-    error" — let it propagate so a real failure isn't hidden.
-    """
+    """Whether the body names CSRF; an unreadable body is a no, and any other error propagates."""
     try:
         text = response.text.lower()
     except (UnicodeDecodeError, httpx.ResponseNotRead, httpx.DecodingError):

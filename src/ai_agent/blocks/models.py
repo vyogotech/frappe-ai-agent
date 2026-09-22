@@ -15,15 +15,7 @@ class TextBlock(BaseModel):
 
 
 class Dataset(BaseModel):
-    """A named series of numeric values.
-
-    `None` is allowed as a "missing data" sentinel — echarts on the FE
-    renders a gap for null series points (correct semantics for
-    "no data" / "not applicable"). Without this, an LLM that emitted
-    null for a missing data point (e.g. profit when purchase cost is
-    unknown) would fail Pydantic validation and the whole chart block
-    would fall back to raw-text rendering.
-    """
+    """A named series; `None` marks a missing point (a gap), so one null cannot fail the chart."""
 
     name: str
     values: list[float | int | None] | list[list[float | int | None]]

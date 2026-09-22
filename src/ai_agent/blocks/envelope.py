@@ -1,22 +1,4 @@
-"""JSON-envelope strategy for constrained-decoding LLMs.
-
-Small Ollama models (≤4B) cannot reliably emit `<ai-block type="...">{...JSON...}
-</ai-block>` markup directly — they leak markdown fences, miss closing tags, and
-mangle inline JSON. To make them production-safe we instead ask them to emit a
-JSON envelope shaped like:
-
-    {"blocks": [{"type": "table", "payload": {...}}, ...]}
-
-and enforce it at the token level via Ollama's `format=<schema>` constrained-
-decoding hook. The envelope's per-type payload schemas mirror the pydantic
-block models (ChartBlock, TableBlock, etc.) closely enough that downstream
-validation rarely catches anything.
-
-`envelope_to_markup` translates a model response (raw JSON or JSON wrapped in
-prose / `​```json` fence) back into the `<ai-block>` markup that
-`ai_agent.blocks.parser.parse_blocks` expects, so the downstream parser and
-streaming splitter remain unchanged.
-"""
+"""The JSON envelope enforced by constrained decoding, and its translation to <ai-block> markup."""
 
 from __future__ import annotations
 
@@ -272,10 +254,8 @@ BLOCK_ENVELOPE_SCHEMA: dict = {
 def block_envelope_schema(tool_names: set[str] | None = None) -> dict:
     """`BLOCK_ENVELOPE_SCHEMA` with `tool_call.payload.name` pinned to `tool_names`.
 
-    The base schema types `name` as a bare string, so `""` is schema-valid and
-    unexecutable. Pinning the enum makes it unreachable at the token level.
-    An empty set returns the shared constant: `enum: []` admits no value and
-    Ollama then emits invalid JSON. Treat the result as read-only.
+    Returns:
+        A copy, or for no names the shared constant itself (`enum: []` breaks Ollama): read-only.
     """
     if not tool_names:
         return BLOCK_ENVELOPE_SCHEMA
@@ -298,16 +278,10 @@ TOOL_CALL_TYPE = "tool_call"
 
 
 def envelope_to_markup(raw: str) -> str:
-    """Translate a JSON envelope LLM response into `<ai-block>` markup.
+    """Translate a model's JSON envelope, bare or in a fence or prose, into `<ai-block>` markup.
 
-    Handles three real model behaviors:
-    - bare JSON (the happy path under `format=` constrained decoding)
-    - JSON wrapped in `​```json` fences or prose (Gemma 3 4B is documented to
-      add commentary around the JSON even with constrained decoding)
-    - text-block-only envelopes (translate to bare prose; the parser treats
-      orphan prose as a TextBlock)
-
-    Raises ValueError on empty input or input that contains no JSON object.
+    Raises:
+        ValueError: the input is empty, holds no JSON object, or the object has no `blocks`.
     """
     if not raw or not raw.strip():
         raise ValueError("empty response")
@@ -524,14 +498,7 @@ def build_agent_messages(
     history: list[BaseMessage] | None = None,
     system_prompt: str = UNIFIED_AGENT_SYSTEM_PROMPT,
 ) -> list[BaseMessage]:
-    """Compose the initial messages list for the unified agent loop.
-
-    `tools_catalog` is a stringified list of available tools (name +
-    description + JSON-schema args) injected into the system message so
-    the model knows what it can call. `context_preamble` carries the
-    per-request page/currency/date context from `build_system_prompt`.
-    `history` is prior turns from `FrappeHistoryClient` if any.
-    """
+    """Compose the initial messages list for the unified agent loop."""
     parts: list[str] = [system_prompt]
     if context_preamble:
         parts.append("\n# Request context\n\n" + context_preamble.strip())
@@ -556,20 +523,10 @@ def iter_complete_blocks(
     *,
     final: bool = False,
 ) -> Iterator[dict[str, Any]]:
-    """Yield block dicts that have JUST completed in `partial`.
+    """Yield each block of `partial` that has just completed: the next has begun, or `final`.
 
-    The `with_structured_output().astream()` API emits a dict snapshot on
-    every token. We want to detect when a particular block index has
-    transitioned from "still streaming" to "definitely closed" so we can
-    translate it to ai-block markup and emit a content_block event.
-
-    The reliable signal is "the NEXT block has started" (or it's the
-    final yield). At that point the closing brace of the current block
-    has arrived; partial-JSON parsing for numbers (digit-by-digit) is
-    only known-done when followed by a structural token.
-
-    `state` is a mutable dict the caller passes across yields. It tracks
-    which indices have been emitted so we don't re-yield.
+    Args:
+        state: the same dict on every call; it records the blocks already yielded.
     """
     state.setdefault("emitted", set())
     if not isinstance(partial, dict):

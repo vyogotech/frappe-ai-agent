@@ -1,27 +1,4 @@
-"""Output-side system-prompt-leak filter.
-
-The system prompt explicitly forbids the model from disclosing its
-instructions, but small instruction-tuned models (e.g. qwen3:8b) cannot
-reliably resist prompt-injection attacks that ask for the system prompt
-verbatim. This module is the defense-in-depth layer: it scans the
-agent's outgoing text content chunks and, if it detects fragments that
-match the system prompt itself, suppresses further leakage and emits a
-safety refusal instead.
-
-Two failure modes we explicitly catch:
-
-1. Verbatim regurgitation — the model dumps SYSTEM_PROMPT sentences
-   one-for-one. We detect via short, distinctive substrings that would
-   not naturally appear in a normal assistant response.
-
-2. Schema enumeration — the model lists the block types (tool_call,
-   text, table, chart, kpi, status_list) or names MCP tools in prose.
-   We detect via the combined-list pattern.
-
-The detector is conservative: it only flags clear leaks, so legitimate
-answers that happen to mention "tools" or "Frappe AI" in passing aren't
-suppressed.
-"""
+"""Output-side filter that suppresses a reply reciting the system prompt."""
 
 from __future__ import annotations
 
@@ -60,18 +37,12 @@ _TOOL_NAMES = (
 
 @dataclass
 class FilterResult:
-    """Outcome of evaluating an accumulated text buffer."""
-
     leaked: bool
     reason: str = ""
 
 
 def detect_system_prompt_leak(text: str) -> FilterResult:
-    """Return whether `text` contains a likely system-prompt leak.
-
-    Conservative: short ordinary text won't match. Only triggers on
-    distinctive fingerprints or clear tool-name enumeration.
-    """
+    """Return whether `text` likely leaks the system prompt; a passing mention of tools does not."""
     if not text or len(text) < 20:
         return FilterResult(leaked=False)
 
@@ -96,17 +67,7 @@ def detect_system_prompt_leak(text: str) -> FilterResult:
 # Stream-friendly stateful filter: keeps a running buffer and reports
 # the first chunk that pushes the buffer over a leak threshold.
 class StreamingLeakFilter:
-    """Stateful filter for SSE chunk streams.
-
-    Usage:
-        f = StreamingLeakFilter()
-        for chunk in agent_stream:
-            verdict = f.observe(chunk["text"])
-            if verdict.leaked:
-                # suppress further content, emit refusal
-                break
-            yield chunk
-    """
+    """Leak check over a stream: once a chunk trips it, every later chunk reports a leak."""
 
     SAFE_REFUSAL_MESSAGE = (
         "I can help with ERPNext data tasks, but I can't share my internal "

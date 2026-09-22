@@ -1,14 +1,4 @@
-"""Per-request context preamble for the Frappe AI agent.
-
-This module owns the *contextual* part of the system prompt — page,
-currency, date-range conventions, anti-fabrication rules around MCP
-tool use. It does NOT own the envelope schema instructions or block-
-type choice heuristics — those live in
-`ai_agent.blocks.envelope.UNIFIED_AGENT_SYSTEM_PROMPT` which is the
-fixed wire-protocol grammar. The output of `build_system_prompt` is
-injected as the "Request context" section of the unified system
-message at request time.
-"""
+"""Per-request context for the system prompt; the envelope grammar is in blocks/envelope.py."""
 
 from __future__ import annotations
 
@@ -133,15 +123,7 @@ _CURRENCY_SYMBOLS: dict[str, str] = {
 
 
 def build_system_prompt(context: dict) -> str:
-    """Build a system prompt with page context and currency injected.
-
-    Currency comes from `context["currency"]` (3-letter ISO code). Falls back
-    to INR — frontend's formatValue() also defaults to INR, so the bubble
-    text and the table-block cells stay consistent. To detect the user's
-    company currency at request time, the calling layer should populate
-    context["currency"] from frappe.db.get_default("currency") or the
-    Company.default_currency field.
-    """
+    """The context preamble; currency defaults to INR, as the frontend's formatValue() does."""
     page_context = "ERPNext (no specific page)"
     currency = "INR"
     if context:

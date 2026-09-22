@@ -11,12 +11,7 @@ from starlette.requests import Request
 
 @dataclass(frozen=True, slots=True)
 class UserContext:
-    """The caller's Frappe session.
-
-    The sid is the Frappe session cookie that authorises every downstream
-    call (MCP tool calls, Frappe REST writes). It must be forwarded on every
-    request made on behalf of this user.
-    """
+    """The caller's Frappe session; `sid` goes on every call made for this user."""
 
     sid: str
 
@@ -26,10 +21,7 @@ class UserContext:
 
 
 def extract_user_context(request: Request) -> UserContext | None:
-    """Return a UserContext if the request carries a non-empty sid cookie.
-
-    Returns None if the cookie is missing, empty, or whitespace-only.
-    """
+    """Return a UserContext if the request carries a non-empty sid cookie."""
     sid = request.cookies.get("sid")
     if not sid or not sid.strip():
         return None
@@ -37,10 +29,10 @@ def extract_user_context(request: Request) -> UserContext | None:
 
 
 async def signed_in_user(frappe_url: str, sid: str) -> str | None:
-    """The user Frappe has signed in under this sid, or None if Frappe does not recognise it.
+    """The user signed in under `sid`, or None if unknown; a fresh client, so no cookie is kept.
 
-    Raises httpx.HTTPError when Frappe cannot be asked. A fresh client per call, so no
-    caller's cookie can be kept and sent for another.
+    Raises:
+        httpx.HTTPError: Frappe cannot be asked.
     """
     async with httpx.AsyncClient(timeout=5.0) as client:
         response = await client.get(

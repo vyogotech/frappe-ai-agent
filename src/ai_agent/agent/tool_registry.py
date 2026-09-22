@@ -1,25 +1,4 @@
-"""Thin tool registry over MCP / LangChain `BaseTool` instances.
-
-The agent loop in `ai_agent.agent.loop` drives a unified envelope schema
-where tool calls are JUST a block type — there is no LangGraph
-`ToolNode`, no `bind_tools`, no per-provider tool-call wire format. All
-the loop needs is "what tools exist, what do they do, and how do I call
-one of them by name and get a stringified result back."
-
-`ToolRegistry` is that surface. It wraps the `list[BaseTool]` returned
-by `MultiServerMCPClient.get_tools()` and exposes:
-
-- `schemas()` — a catalog rendering for the system prompt
-- `names()` — for quick existence checks
-- `ainvoke(name, args)` — the only entry point the loop calls; folds any
-  exception into a tool-result string so a tool error is data the LLM
-  reasons about, not an abort that kills the SSE stream
-
-Per-tool error handling lives here instead of being patched onto each
-`BaseTool` (the old `install_tool_error_handler` approach) so the
-registry is the single chokepoint for both error policy and the
-LangChain dependency.
-"""
+"""Name-to-tool registry over the MCP tools, and the one place a tool error becomes data."""
 
 from __future__ import annotations
 
@@ -49,12 +28,7 @@ def _is_permission_error(exc: Exception) -> bool:
 
 
 def _exception_to_result(exc: Exception) -> str:
-    """Convert any exception into a tool-result string the LLM can act on.
-
-    Free of stack traces / internal details. Permission errors are
-    distinguished from generic failures so the LLM can surface the
-    right user-facing message.
-    """
+    """Convert any exception into a tool-result string the LLM can act on."""
     if _is_permission_error(exc):
         return f"Access denied: permission error — {exc}"
     return f"Tool call failed: {exc}"
@@ -81,12 +55,7 @@ class ToolRegistry:
         return name in self._by_name
 
     def schemas(self) -> str:
-        """Render the tool catalog as a string for the system prompt.
-
-        Format: one tool per block. `name` + first-paragraph description
-        + arg schema. Kept compact so the model can scan it; long
-        descriptions are truncated.
-        """
+        """Render the tool catalog as a string for the system prompt."""
         if not self._by_name:
             return "(no tools available this turn)"
         lines: list[str] = []
@@ -102,11 +71,7 @@ class ToolRegistry:
         return "\n".join(lines)
 
     async def ainvoke(self, name: str, args: dict[str, Any] | None) -> str:
-        """Run the named tool with `args`; always return a stringified result.
-
-        Any exception becomes a tool-result string. Unknown tool names
-        return an `error:` string so the model can correct itself.
-        """
+        """Run the named tool; never raises: an unknown name or an error comes back as a string."""
         if name not in self._by_name:
             return f"error: unknown tool {name!r}; available: {sorted(self._by_name)}"
         tool = self._by_name[name]
@@ -137,12 +102,7 @@ AGENT_ARGS = {"search_knowledge_base": {"session"}}
 
 
 def _render_args_schema(tool: BaseTool) -> str:
-    """Render a tool's argument schema as compact JSON for the prompt.
-
-    `BaseTool.args_schema` is typically a pydantic model. We render its
-    JSON schema (just the `properties` map) so the LLM sees field names,
-    types, and descriptions in a familiar shape.
-    """
+    """Render a tool's argument schema as compact JSON for the prompt."""
     args_schema = getattr(tool, "args_schema", None)
     if args_schema is None:
         return "{}"

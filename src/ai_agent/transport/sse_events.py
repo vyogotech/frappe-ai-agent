@@ -1,28 +1,4 @@
-"""SSE serialization + typed event contract.
-
-The agent emits seven event kinds on `POST /api/v1/chat`. Each is shipped
-as a `data: <json>\\n\\n` SSE frame; the frontend parses each frame and
-dispatches on the `type` field.
-
-The `TypedDict` definitions below are the wire contract. The FE can copy
-this file (or a generated TS equivalent) to get full type safety against
-the agent's actual emissions. `validate_event` runtime-checks an event
-dict against the union and raises `ValueError` on a mismatch — used by
-tests to catch contract drift without paying the cost on every emit.
-
-Seven event kinds (in emission order over a turn):
-
-- `session`       — `id: str`. First frame, always.
-- `tool_call`     — `name: str`, `arguments: dict`. One per agent tool invocation.
-- `sources`       — `items: list[dict]`. The passages `search_knowledge_base` returned
-  (`file`, `seq`, `distance`, `content` cut to 300 chars); right after that tool runs.
-- `content`       — `text: str`. Prose token chunks; streamed.
-- `content_block` — `block: dict`. Complete parsed structured-block payload.
-- `error`         — `message: str`. Fatal; followed by `done`.
-- `done`          — `tools_called: list[str]`, `data_quality`, `timestamp: str`, and
-  `usage` when the model reports its decode time.
-  Terminal frame; always last.
-"""
+"""The SSE event contract: `session` first, `done` last, and every `error` followed by `done`."""
 
 from __future__ import annotations
 
@@ -96,17 +72,7 @@ _REQUIRED_FIELDS: dict[str, set[str]] = {
 
 
 def validate_event(event: dict[str, Any]) -> None:
-    """Raise ValueError if `event` doesn't match the SSEEvent contract.
-
-    Checks (in order): the `type` field is present, it's a known kind,
-    and every required field for that kind is present. The exact value
-    types are not deep-checked here — the typed TypedDict declaration
-    above is the source of truth for that, and pyright enforces it at
-    the emit sites.
-
-    Intended for use in tests asserting that ChatService's emissions
-    match the contract; not called from the hot path.
-    """
+    """Raise ValueError unless `event` has a known `type` and its fields; values are unchecked."""
     if "type" not in event:
         raise ValueError(f"event missing required 'type' field: {event!r}")
     kind = event["type"]

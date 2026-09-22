@@ -39,10 +39,7 @@ _BLOCK_PATTERN = re.compile(
 
 
 def parse_blocks(text: str) -> list[ContentBlock]:
-    """Extract content blocks from LLM output text.
-
-    Falls back to TextBlock for malformed JSON or unknown types.
-    """
+    """Content blocks in model output; bad JSON or an unknown type falls back to a TextBlock."""
     blocks: list[ContentBlock] = []
     last_end = 0
 

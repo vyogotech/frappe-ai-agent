@@ -9,10 +9,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 
 def create_tracer_provider(endpoint: str, service_name: str) -> TracerProvider:
-    """Create and register an OTEL TracerProvider.
-
-    If endpoint is empty, uses a no-op exporter (tracing disabled).
-    """
+    """Create and register an OTEL TracerProvider; an empty endpoint exports nothing."""
     resource = Resource.create({"service.name": service_name})
     provider = TracerProvider(resource=resource)
 

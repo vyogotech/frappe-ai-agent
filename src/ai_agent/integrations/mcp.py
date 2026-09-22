@@ -26,13 +26,10 @@ DEPRECATED_TOOLS = frozenset(
 
 
 def build_mcp_client_for_sid(settings: Settings, sid: str) -> MultiServerMCPClient:
-    """Return a new MCP client configured to forward the caller's Frappe sid.
-
-    Every call to this function returns a NEW client. Sharing clients across
-    requests would leak one user's sid into another user's tool calls.
+    """A new client per call, forwarding `sid`: shared, it would carry one user's sid to another.
 
     Raises:
-        ValueError: if sid is empty or whitespace-only.
+        ValueError: `sid` is empty or whitespace-only.
     """
     if not sid or not sid.strip():
         raise ValueError("build_mcp_client_for_sid requires a non-empty sid")
@@ -48,8 +45,4 @@ def build_mcp_client_for_sid(settings: Settings, sid: str) -> MultiServerMCPClie
 
 
 def filter_deprecated(tools: list[BaseTool]) -> list[BaseTool]:
-    """Drop tools whose name is in `DEPRECATED_TOOLS`.
-
-    Returned list preserves input order; the original list is not mutated.
-    """
     return [t for t in tools if t.name not in DEPRECATED_TOOLS]

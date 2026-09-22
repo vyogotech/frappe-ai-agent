@@ -28,7 +28,6 @@ def _drop_request_id(_logger, _method, event_dict):
 
 
 def setup_logging(level: str = "info", log_format: str = "json") -> None:
-    """Configure structlog with JSON or console output."""
     log_level = getattr(logging, level.upper(), logging.INFO)
 
     base_processors: list[structlog.types.Processor] = [

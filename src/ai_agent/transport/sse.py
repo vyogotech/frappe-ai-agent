@@ -17,11 +17,7 @@ from ai_agent.transport.sse_events import serialize
 
 
 async def _require_sid(request: Request) -> UserContext:
-    """Why: FastAPI Depends() runs before the @limiter.limit decorator's
-    rate-limit check, so unauthenticated callers 401 without consuming a
-    token from the (IP-keyed) bucket — preventing one bad actor from
-    locking out a shared NAT.
-    """
+    """Auth as a dependency: it runs before @limiter.limit, so a 401 spends no rate-limit token."""
     user_context = extract_user_context(request)
     if user_context is None:
         raise HTTPException(status_code=401, detail="Missing sid cookie")
@@ -76,12 +72,7 @@ def create_sse_router(
     limiter: Limiter | None = None,
     rate_limit: str = "30/minute",
 ) -> APIRouter:
-    """Build the SSE chat router.
-
-    `limiter` is optional so test bootstrap code (BDD scenarios that don't
-    go through `create_app`) can wire the router directly. In production
-    `create_app` always passes a real limiter.
-    """
+    """Build the SSE chat router; `limiter` is optional only for tests that skip create_app."""
     router = APIRouter()
     limit = limiter.limit(rate_limit) if limiter is not None else _noop_limit
 

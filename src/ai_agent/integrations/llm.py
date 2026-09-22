@@ -10,7 +10,6 @@ from ai_agent.config import Settings
 
 
 def create_llm(settings: Settings) -> BaseChatModel:
-    """Create a chat model from settings. Provider-agnostic."""
     provider = settings.llm_provider.lower()
 
     if provider == "ollama":
