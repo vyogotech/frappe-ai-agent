@@ -47,7 +47,7 @@ target-version = "py312"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["F", "E", "W", "I", "UP", "B", "RUF"]
+select = ["F", "E", "W", "I", "UP", "B", "RUF", "S110", "BLE001", "E722", "T20", "G", "ERA001", "TD003", "FIX002"]
 
 [tool.pyright]
 # Type-check both src and tests. Test-only patterns that pyright legitimately
