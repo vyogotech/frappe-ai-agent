@@ -329,7 +329,7 @@ def _stream_events(
             done = sent.get(i, 0)
             if isinstance(text, str) and len(text) > done:
                 delta = text[done:]
-                if lead and not sent:
+                if i not in sent and (sent or lead):  # a new paragraph after any text already sent
                     delta = "\n\n" + delta
                 sent[i] = len(text)
                 yield {"type": "content", "text": delta}
