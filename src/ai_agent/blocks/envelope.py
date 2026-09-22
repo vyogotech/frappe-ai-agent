@@ -5,8 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import re
-from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -20,7 +19,6 @@ __all__ = [
     "block_envelope_schema",
     "build_agent_messages",
     "envelope_to_markup",
-    "iter_complete_blocks",
 ]
 
 
@@ -510,40 +508,3 @@ def build_agent_messages(
         msgs.extend(history)
     msgs.append(HumanMessage(content=user_message))
     return msgs
-
-
-# --------------------------------------------------------------------------- #
-# Streaming: detect newly-completed blocks across partial-dict yields
-# --------------------------------------------------------------------------- #
-
-
-def iter_complete_blocks(
-    partial: dict[str, Any] | None,
-    state: dict[str, Any],
-    *,
-    final: bool = False,
-) -> Iterator[dict[str, Any]]:
-    """Yield each block of `partial` that has just completed: the next has begun, or `final`.
-
-    Args:
-        state: the same dict on every call; it records the blocks already yielded.
-    """
-    state.setdefault("emitted", set())
-    if not isinstance(partial, dict):
-        return
-    blocks = partial.get("blocks")
-    if not isinstance(blocks, list):
-        return
-    n = len(blocks)
-    for i, b in enumerate(blocks):
-        if i in state["emitted"]:
-            continue
-        next_started = i < n - 1
-        if not (next_started or final):
-            continue
-        if not isinstance(b, dict) or "type" not in b or "payload" not in b:
-            # Malformed block — skip but mark emitted so we don't loop.
-            state["emitted"].add(i)
-            continue
-        state["emitted"].add(i)
-        yield b

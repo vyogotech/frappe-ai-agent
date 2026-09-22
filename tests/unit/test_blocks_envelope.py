@@ -15,7 +15,6 @@ from ai_agent.blocks.envelope import (
     block_envelope_schema,
     build_agent_messages,
     envelope_to_markup,
-    iter_complete_blocks,
 )
 from ai_agent.blocks.parser import parse_blocks
 
@@ -318,73 +317,3 @@ class TestBuildAgentMessages:
         assert msgs[1] is prior[0]
         assert msgs[2] is prior[1]
         assert msgs[3].content == "follow up"
-
-
-class TestIterCompleteBlocks:
-    def test_emits_only_blocks_followed_by_a_next_block(self):
-        # 3-block partial; only the first two are "definitely closed"
-        # because the third is the latest and may still be growing.
-        partial = {
-            "blocks": [
-                {"type": "text", "payload": {"content": "intro"}},
-                {"type": "kpi", "payload": {"metrics": [{"label": "rev", "value": 100}]}},
-                {"type": "table", "payload": {"title": "Tab", "columns": [], "rows": []}},
-            ]
-        }
-        state: dict = {}
-        emitted = list(iter_complete_blocks(partial, state, final=False))
-        assert [b["type"] for b in emitted] == ["text", "kpi"]
-        # 3rd block waits.
-        emitted2 = list(iter_complete_blocks(partial, state, final=False))
-        assert emitted2 == []
-
-    def test_final_flag_flushes_last_block(self):
-        partial = {
-            "blocks": [
-                {"type": "text", "payload": {"content": "hi"}},
-                {"type": "kpi", "payload": {"metrics": [{"label": "x", "value": 1}]}},
-            ]
-        }
-        state: dict = {}
-        # First call with final=False emits only the first.
-        first = list(iter_complete_blocks(partial, state, final=False))
-        assert [b["type"] for b in first] == ["text"]
-        # Then final=True flushes the second.
-        second = list(iter_complete_blocks(partial, state, final=True))
-        assert [b["type"] for b in second] == ["kpi"]
-
-    def test_idempotent_across_redundant_yields(self):
-        partial1 = {"blocks": [{"type": "text", "payload": {"content": "hi"}}]}
-        partial2 = {
-            "blocks": [
-                {"type": "text", "payload": {"content": "hi"}},
-                {"type": "kpi", "payload": {"metrics": [{"label": "x", "value": 1}]}},
-            ]
-        }
-        state: dict = {}
-        # First partial: 1 block, no next started, no final — emits nothing.
-        assert list(iter_complete_blocks(partial1, state, final=False)) == []
-        # Second partial: 2 blocks, first now has a next — emit first only.
-        out = list(iter_complete_blocks(partial2, state, final=False))
-        assert [b["type"] for b in out] == ["text"]
-        # Third call with same partial2 — nothing new.
-        assert list(iter_complete_blocks(partial2, state, final=False)) == []
-
-    def test_skips_malformed_block_dicts(self):
-        partial = {
-            "blocks": [
-                {"type": "text", "payload": {"content": "ok"}},
-                {"invalid": "shape"},
-                {"type": "kpi", "payload": {"metrics": [{"label": "x", "value": 1}]}},
-            ]
-        }
-        state: dict = {}
-        # final=True flushes everything.
-        out = list(iter_complete_blocks(partial, state, final=True))
-        assert [b["type"] for b in out] == ["text", "kpi"]
-
-    def test_none_or_non_dict_input_yields_nothing(self):
-        state: dict = {}
-        assert list(iter_complete_blocks(None, state, final=True)) == []
-        assert list(iter_complete_blocks({}, state, final=True)) == []
-        assert list(iter_complete_blocks({"blocks": "not-a-list"}, state, final=True)) == []
