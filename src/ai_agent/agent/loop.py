@@ -111,7 +111,8 @@ async def run_agent_loop(
         history=history,
     )
 
-    seen_calls: dict[tuple[str, str], int] = {}
+    last_calls: list[tuple[str, str]] = []
+    repeats = 0
     spoke = False  # text sent in an earlier iteration; the next answer starts a paragraph
 
     for step in range(max_steps):
@@ -214,28 +215,18 @@ async def run_agent_loop(
         for ev in _stream_events(final_envelope, sent, emitted, final=True, lead=spoke):
             spoke = True
             yield ev
-        # Emit synthetic tool_call SSE events so the FE can render "fetching..." UI, then execute
-        # each tool and feed results back into the message list.
-        for tb in tool_blocks:
-            payload = tb.get("payload") or {}
-            name = str(payload.get("name") or "")
-            args = payload.get("arguments") or {}
-            if not isinstance(args, dict):
-                args = {}
-            yield {"type": "tool_call", "name": name, "arguments": args}
-
-        # Repeat-detection: same tool with same args N+ times = giving up.
-        repeated = False
-        for tb in tool_blocks:
-            payload = tb.get("payload") or {}
-            key = (
-                str(payload.get("name") or ""),
-                json.dumps(payload.get("arguments") or {}, sort_keys=True),
+        # Repeat-detection, before anything is announced: the same calls with the same arguments
+        # N steps in a row = giving up. A different call between them resets the count.
+        calls = [
+            (
+                str((tb.get("payload") or {}).get("name") or ""),
+                json.dumps((tb.get("payload") or {}).get("arguments") or {}, sort_keys=True),
             )
-            seen_calls[key] = seen_calls.get(key, 0) + 1
-            if seen_calls[key] >= _REPEAT_LIMIT:
-                repeated = True
-        if repeated:
+            for tb in tool_blocks
+        ]
+        repeats = repeats + 1 if calls == last_calls else 1
+        last_calls = calls
+        if repeats >= _REPEAT_LIMIT:
             logger.warning("agent_loop_repeat_limit_reached", repeat_limit=_REPEAT_LIMIT)
             yield {
                 "type": "content",
@@ -246,6 +237,16 @@ async def run_agent_loop(
                 ),
             }
             return
+
+        # Emit synthetic tool_call SSE events so the FE can render "fetching..." UI, then execute
+        # each tool and feed results back into the message list.
+        for tb in tool_blocks:
+            payload = tb.get("payload") or {}
+            name = str(payload.get("name") or "")
+            args = payload.get("arguments") or {}
+            if not isinstance(args, dict):
+                args = {}
+            yield {"type": "tool_call", "name": name, "arguments": args}
 
         # Execute tools and append results to the message stream.
         result_lines: list[str] = []
