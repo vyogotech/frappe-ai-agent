@@ -11,13 +11,8 @@ from ai_agent.config import Settings
 if TYPE_CHECKING:
     from langchain_core.tools import BaseTool
 
-# MCP tools that frappe-mcp-server keeps for backward compatibility but
-# that we don't want the LLM to invoke. The project-status family was
-# replaced by generic aggregate_documents / run_report flows; surfacing
-# them just gives the LLM a tempting wrong-path option that fails on
-# sites without the corresponding doctypes. Filtered out at the agent
-# boundary (here) rather than in the MCP server itself so the server
-# can keep serving older clients that still depend on them.
+# Kept by frappe-mcp-server for older clients, hidden from the LLM here: they fail on
+# sites without the project doctypes; aggregate_documents and run_report replace them.
 DEPRECATED_TOOLS = frozenset(
     {
         "get_project_status",

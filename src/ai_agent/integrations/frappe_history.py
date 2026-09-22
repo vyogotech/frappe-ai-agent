@@ -29,10 +29,7 @@ from opentelemetry import metrics, trace
 logger = structlog.get_logger(__name__)
 _tracer = trace.get_tracer(__name__)
 
-# Counter for sustained-failure alerting. Without this, a Frappe-write
-# outage looks identical to a healthy system from outside the process —
-# the WARN logs are per-call, not aggregable. Attribute `kind` lets a
-# dashboard split "all sessions failing" from "all messages failing".
+# Logs are per call; this counter is what an alert on a sustained Frappe write outage reads.
 _meter = metrics.get_meter(__name__)
 _history_write_failures = _meter.create_counter(
     name="agent.history.write_failures",
@@ -73,22 +70,12 @@ class FrappeHistoryClient:
         # invalidate an entry whenever a write fails with a CSRF error so
         # the next call picks up the fresh one.
         self._csrf_cache: dict[str, str] = {}
-        # Long-lived AsyncClient reused across all calls from this
-        # instance. Opening a fresh client per write paid a new TCP
-        # connection setup (plus TLS handshake when behind HTTPS) per
-        # 3-4 calls per chat turn. The single client gets a connection
-        # pool keyed by host and reuses it. Lazy-init so a Settings()
-        # default doesn't force a connection pool at config-load time
-        # for processes that never touch Frappe (CLI tools, tests).
+        # One pooled client per instance, made lazily so a process that never writes opens no pool.
         self._client: httpx.AsyncClient | None = None
         self._closed = False
 
     def _get_client(self) -> httpx.AsyncClient:
-        # Raise after aclose() rather than silently building a new pool:
-        # the earlier shape (return a fresh client while leaving
-        # `_closed = True`) leaked the new pool because the next
-        # aclose() short-circuited on the stale flag. Programming
-        # errors here must be loud, not silent resource leaks.
+        # Raise, not rebuild: a new client here would leak, since aclose() returns once closed.
         if self._closed:
             raise RuntimeError(
                 "FrappeHistoryClient is closed; build a new instance for further writes"
@@ -284,12 +271,7 @@ class FrappeHistoryClient:
                     follow_redirects=False,
                 )
             response.raise_for_status()
-            # Frappe responds 200 + 302→/login when the sid is missing /
-            # expired / belongs to Guest, and httpx silently follows the
-            # redirect. The login page never contains `csrf_token = ...`,
-            # so without this check we just emit a generic "not found"
-            # warning that hides the real cause. Surface it directly so an
-            # operator immediately sees "the sid you forwarded is invalid".
+            # A missing, expired or Guest sid ends on /login, whose page has no csrf_token: say so.
             if "/login" in response.url.path:
                 logger.warning(
                     "frappe_history_csrf_fetch_unauthenticated",
@@ -336,19 +318,9 @@ class FrappeHistoryClient:
         sid: str,
         kind: str,
     ) -> str | None:
-        # `agent.history.write` nests under the active agent.chat_turn span
-        # when this is called from ChatService, giving the trace UI a named
-        # row for each history write. The kind attribute lets you see at a
-        # glance "where did 300ms go" — session create vs message save vs
-        # ensure. get_tracer is a no-op when OTEL is disabled.
         with _tracer.start_as_current_span("agent.history.write") as span:
             span.set_attribute("kind", kind)
-            # Establish the client (or raise RuntimeError on a closed
-            # instance) BEFORE the try/except below. That except swallows
-            # everything to keep chat turns alive on Frappe outages, but
-            # a programming error (use-after-close) must propagate
-            # cleanly so it surfaces as a test failure or 500 instead of
-            # silently swallowing the write.
+            # Outside the try, which swallows Frappe outages: use-after-close must raise.
             client = self._get_client()
 
             csrf_token = await self._csrf_token_for(sid)
@@ -368,17 +340,8 @@ class FrappeHistoryClient:
                         headers[_CSRF_HEADER] = fresh
                         response = await client.post(url, json=payload, headers=headers)
 
-                # 409 on an explicit-name session POST is the documented
-                # idempotent path: ensure_session always re-posts the same
-                # name on every continued turn, and "already exists" means
-                # the row is already there from a prior turn. Surface this
-                # as info, not warning, and short-circuit to the supplied
-                # name so the caller doesn't fall through to the generic
-                # write-failed branch (which fires the alerting counter).
-                #
-                # Limited to kind=="session" + payload carrying a "name":
-                # AI Chat Message creates are auto-named by Frappe, so a
-                # 409 there is a real bug worth shouting about.
+                # 409 on a named session is ensure_session re-posting an existing row: success, not
+                # a failed write. Messages are auto-named, so a 409 there is a real failure.
                 if response.status_code == 409 and kind == "session" and "name" in payload:
                     logger.info(
                         "frappe_history_session_already_exists",
@@ -393,12 +356,7 @@ class FrappeHistoryClient:
                 span.set_attribute("status_code", response.status_code)
                 return response.json()["data"]["name"]
             except Exception as exc:
-                # Structured event + counter so a sustained Frappe-write
-                # outage is both grep-able in logs and scrape-able as a
-                # metric. status_code is recorded when the failure was an
-                # HTTP response (httpx HTTPStatusError carries
-                # .response.status_code); for transport errors (timeout,
-                # DNS, refused) it is None.
+                # Transport errors (timeout, DNS, refused) have no response, so status_code is None.
                 status_code = getattr(getattr(exc, "response", None), "status_code", None)
                 logger.warning(
                     "frappe_history_write_failed",

@@ -54,11 +54,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     setup_logging(level=settings.log_level, log_format=settings.log_format)
 
-    # Services + routers are bound at factory time, not during startup.
-    # Why: routers wired inside `lifespan` are invisible to anything that
-    # inspects `app.routes` before the first request (tests, OpenAPI
-    # scrapers). All construction here is in-process and synchronous
-    # (no network I/O — ChatService builds its MCP client per request).
+    # Built here, not in lifespan: routes wired there are missing from app.routes until the
+    # first request. Keep this construction free of network I/O.
     llm = create_llm(settings)
     chat_service = ChatService(
         settings=settings,
@@ -99,19 +96,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url=None,
     )
 
-    # slowapi: register the 429 handler. Why no SlowAPIMiddleware: the
-    # middleware runs the limit check before FastAPI dependency resolution,
-    # so unauthenticated requests would burn a token before the sid-check
-    # 401s. Without the middleware, the @limiter.limit decorator performs
-    # the check inside the wrapped function — i.e. after Depends() runs.
+    # No SlowAPIMiddleware: it runs before Depends(), so requests without a valid sid would
+    # spend tokens before their 401; @limiter.limit checks after Depends().
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 
     # Middleware
-    # Credentialed CORS: the Frappe frontend forwards the `sid` cookie so the
-    # agent can authenticate the caller against Frappe. That requires an
-    # explicit origin list (no "*", enforced by config.py) and
-    # allow_credentials=True.
+    # Credentialed, for the sid cookie the frontend forwards; config.py rejects a "*" origin.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,

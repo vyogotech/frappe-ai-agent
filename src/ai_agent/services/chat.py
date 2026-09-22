@@ -196,22 +196,11 @@ class ChatService:
         # (immune to system clock jumps).
         t0 = time.perf_counter()
 
-        # `agent.chat_turn` wraps the entire turn. Inner spans
-        # (load_tools, graph_run) nest under it so a trace UI shows the
-        # anatomy at a glance: "the 18s turn was 0.8s load_tools +
-        # 16.9s graph_run + 0.3s history writes". get_tracer returns a
-        # ProxyTracer that defers to the global provider at use-time,
-        # so this is a no-op when OTEL is disabled.
         turn: dict[str, Any] = {"session_id": session_id, "t0": t0}
         with (
             _tracer.start_as_current_span("agent.chat_turn") as turn_span,
             _log_when_cancelled(turn, tools_called, assistant_text_parts),
         ):
-            # Resolve / create the history session BEFORE the graph runs so
-            # the user's message and the eventual assistant reply can both
-            # be stored. If Frappe is unreachable, fall back to a
-            # client-side id so the rest of the request still works; the
-            # history is just lost for this turn.
             if session_id is None:
                 created = await self._history.create_session(
                     sid=user_context.sid,
@@ -227,11 +216,7 @@ class ChatService:
                 else:
                     session_id = created
             else:
-                # Caller supplied an id (e.g. Frappe forwarded the browser's
-                # conversation id). Ensure a matching AI Chat Session row
-                # exists so the upcoming save_message calls' Link validation
-                # doesn't 417. Idempotent: a duplicate-name create is
-                # treated as success.
+                # save_message 417s until this session row exists; a duplicate create is a no-op.
                 await self._history.ensure_session(
                     sid=user_context.sid,
                     name=session_id,
@@ -242,20 +227,10 @@ class ChatService:
             turn_span.set_attribute("session_id", session_id)
             turn["session_id"] = session_id
 
-            # Announce the session id so the frontend can remember it and
-            # pass it back on subsequent messages in the same conversation.
-            # Without this round-trip every user message would land in a
-            # brand-new AI Chat Session row.
+            # The frontend sends this id back; without it every message opens a new session.
             yield {"type": "session", "id": session_id}
 
             # Read before the question is saved, so the history holds only earlier turns.
-            # Pull prior turns from this session so the LLM can resolve
-            # references ("the first one", "sort by name", "yes, delete")
-            # against the conversation it's actually in. Best-effort — a
-            # history-load failure logs and proceeds with an empty list
-            # rather than aborting the whole turn. `tmp-*` ids are unsaved
-            # sessions (history is by definition empty); skip the
-            # round-trip.
             history_messages: list[BaseMessage] = []
             if session_id and not session_id.startswith("tmp-"):
                 try:
@@ -315,15 +290,7 @@ class ChatService:
                             f"MCP tools/list timed out after {tools_load_timeout_s:.0f}s"
                         ) from exc
                     except Exception as exc:
-                        # MCP server unreachable / refusing the handshake /
-                        # returning errors. Soft-fail: log a warning and let
-                        # the agent run with an empty tool registry. The
-                        # model can still answer conversational queries
-                        # ("hi", "what doctypes exist") and emit "I need
-                        # data tools to answer that" for data questions —
-                        # both better UX than a hard 'Tools unavailable'
-                        # that blocks every turn including the ones tools
-                        # weren't needed for.
+                        # Soft-fail: without tools the model still answers turns that need no data.
                         root: BaseException = exc
                         while isinstance(root, BaseExceptionGroup) and root.exceptions:
                             root = root.exceptions[0]
@@ -341,10 +308,6 @@ class ChatService:
                         tools = []
                     load_span.set_attribute("tool_count", len(tools))
 
-                # Drop deprecated MCP tools (project-status family — see
-                # `integrations.mcp.DEPRECATED_TOOLS` for the policy and
-                # the list). They confuse the LLM and surface as failed
-                # tool_call cards on doctypes the user doesn't even use.
                 pre_count = len(tools)
                 tools = filter_deprecated(tools)
                 if pre_count != len(tools):
@@ -356,10 +319,6 @@ class ChatService:
                     session_id=session_id,
                 )
 
-                # Per-request preamble — page context + currency + date
-                # conventions + tool-use rules. Injected into the unified
-                # agent system message by `build_agent_messages`. The
-                # envelope schema itself is fixed in `ai_agent.blocks.envelope`.
                 context_preamble = self._build_system_prompt(context or {})
                 if tools_unavailable_reason is not None:
                     # Soft-degraded: tell the model so it answers data
@@ -375,23 +334,13 @@ class ChatService:
                     )
                 tool_registry = ToolRegistry(tools)
 
-                # Unified agent loop. tool_call is a block type in the
-                # envelope; the loop drives the LLM via
-                # `with_structured_output(...).astream(...)` and yields
-                # SSE-schema events directly.
-                # `max_steps` derived from settings.agent_recursion_limit
-                # (each step is at most one LLM call + tool fan-out).
+                # A step is one LLM call plus its tool calls: two units of the recursion limit.
                 max_steps = max(1, self._settings.agent_recursion_limit // 2)
                 with _tracer.start_as_current_span("agent.run") as run_span:
                     run_span.set_attribute("tool_count", len(tool_registry))
                     run_span.set_attribute("max_steps", max_steps)
                     run_span.set_attribute("history_turns", len(history_messages))
-                    # Defense-in-depth: scan outgoing text chunks for
-                    # system-prompt leakage. The system prompt explicitly
-                    # forbids disclosure, but small instruct models can be
-                    # talked past that rule. If a leak is detected mid-stream,
-                    # we stop forwarding LLM output and emit a safe refusal.
-                    # See BUG-019 + tests/unit/test_leak_filter.py.
+                    # The prompt forbids disclosure; small models get talked past it.
                     leak_filter = StreamingLeakFilter()
                     leak_triggered = False
                     async for ev in run_agent_loop(
@@ -426,12 +375,7 @@ class ChatService:
                                     session_id=session_id,
                                     reason=verdict.reason,
                                 )
-                                # Replace whatever the model was streaming
-                                # with a safe refusal. The frontend appends
-                                # content chunks in arrival order; emitting
-                                # an `error` chunk would settle the stream
-                                # and discard text already published, so we
-                                # emit refusal text and a `done`.
+                                # Refusal text, not an error event, which drops the text shown.
                                 refusal = StreamingLeakFilter.SAFE_REFUSAL_MESSAGE
                                 assistant_text_parts.append("\n\n" + refusal)
                                 yield {"type": "content", "text": "\n\n" + refusal}
@@ -444,10 +388,7 @@ class ChatService:
             except Exception as exc:
                 failed = True
                 error_type = type(exc).__name__
-                # Unwrap ExceptionGroup (from anyio/asyncio TaskGroup) to
-                # the real cause — otherwise the FE shows the opaque outer
-                # "unhandled errors in a TaskGroup (N sub-exceptions)"
-                # instead of the actual auth/MCP/LLM failure underneath.
+                # Unwrap TaskGroup's ExceptionGroup, or the user sees its opaque outer message.
                 display_exc: BaseException = exc
                 while isinstance(display_exc, BaseExceptionGroup) and display_exc.exceptions:
                     display_exc = display_exc.exceptions[0]
@@ -467,11 +408,7 @@ class ChatService:
                 # captures the type/message/stacktrace as a span event.
                 turn_span.record_exception(exc)
                 turn_span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
-                # Show the exception type plus the first line of its
-                # message, capped at 500 chars. Full tracebacks stay in
-                # the structured log, but this is an
-                # internally-authenticated agent — withholding the whole
-                # error breaks debugging for no real security gain.
+                # Deliberate: the user gets the type and first line; the traceback stays in the log.
                 first_line = str(display_exc).splitlines()[0] if str(display_exc) else ""
                 detail = first_line[:500]
                 error_message = (
@@ -530,12 +467,6 @@ class ChatService:
                 **({"usage": usage} if usage else {}),
             }
 
-            # Final summary attributes on the chat_turn span — these are
-            # what a trace UI shows as the per-turn rollup. Mirrors the
-            # turn-summary log fields below; the log is for stdout-based
-            # aggregation, the span is for trace-UI navigation. Both are
-            # kept because operators reach for whichever tool is in front
-            # of them.
             content_chars = sum(len(p) for p in assistant_text_parts)
             turn_span.set_attribute("tools_called_count", len(tools_called))
             turn_span.set_attribute("content_chars", content_chars)
@@ -544,11 +475,7 @@ class ChatService:
             if error_type is not None:
                 turn_span.set_attribute("error_type", error_type)
 
-            # Single info-level audit event per turn. One log line answers
-            # "what happened on this chat call" without grepping multiple
-            # streams; failed=True funnels error_type so dashboards can
-            # bucket failures by class. Emitted after `done` so a cancelled
-            # turn (client aclose) is not summarised as completed.
+            # After `done`, so a turn the client cancels is not logged as completed.
             duration_ms = (time.perf_counter() - t0) * 1000.0
             summary: dict[str, Any] = {
                 "session_id": session_id,

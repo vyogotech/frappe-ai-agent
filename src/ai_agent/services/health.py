@@ -39,10 +39,7 @@ class HealthService:
             return {"ok": False}
 
     async def _check_llm(self) -> dict[str, Any]:
-        # Only Ollama exposes `/api/tags`. Hosted providers (OpenAI, Anthropic,
-        # Google) use auth-gated `/v1/models` endpoints we don't want to call
-        # from a public health route, so we skip the probe and let `healthy`
-        # remain a function of the MCP probe alone.
+        # Only Ollama has an unauthenticated probe (/api/tags); hosted /v1/models needs the key.
         provider = self._settings.llm_provider.lower()
         if provider != "ollama":
             return {"ok": True, "skipped": True, "reason": f"no probe for provider={provider}"}

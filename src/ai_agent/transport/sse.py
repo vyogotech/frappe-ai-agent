@@ -34,10 +34,7 @@ async def _require_sid(request: Request) -> UserContext:
     return user_context
 
 
-# Why: `context` is forwarded into the system prompt; an unbounded dict lets
-# a misbehaving frontend (or a malicious caller) blow up token usage per
-# request. 8 KB is enough for page context (doctype/docname/route/currency
-# and a few extras) while keeping the prompt budget predictable.
+# context goes into the system prompt, so this caps the tokens one request can spend.
 _MAX_CONTEXT_BYTES = 8 * 1024
 
 

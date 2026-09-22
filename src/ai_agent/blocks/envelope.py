@@ -200,16 +200,9 @@ _STATUS_LIST_PAYLOAD: dict = {
     "additionalProperties": False,
 }
 
-# The envelope uses `oneOf` per block type so Ollama (via llama.cpp's JSON-
-# schema-to-GBNF grammar) enforces per-type payload shape at every token. This
-# is what stops small models from echoing JSON-schema-like nested objects into
-# payloads (a real failure mode on smollm2:1.7b at A5 in the prior baseline).
-#
-# `title` and `description` are required when this schema is routed through
-# providers that map structured output → function calling (langchain-openai
-# does this for the `openai` provider, including when pointed at Ollama's
-# OpenAI-compat layer). The values become the function name / description.
-# Ollama's native grammar generator treats both as metadata and ignores them.
+# oneOf per block type lets Ollama's grammar enforce each payload's shape at every token;
+# small models echo schema-like objects into payloads without it. title and description
+# are required by providers that map structured output to function calling (langchain-openai).
 BLOCK_ENVELOPE_SCHEMA: dict = {
     "title": "BlockEnvelope",
     "description": (
@@ -340,10 +333,7 @@ def envelope_to_markup(raw: str) -> str:
         if not isinstance(payload, dict):
             continue
         if btype == TOOL_CALL_TYPE:
-            # tool_call blocks are agent-loop machinery, never user-visible
-            # markup. They're skipped here so callers can pass a full
-            # envelope (including tool_calls already-executed) through
-            # without leaking machinery into the FE.
+            # Loop machinery, never shown: callers may pass tool_calls that already ran.
             continue
         if btype == "text":
             content = str(payload.get("content") or "")
@@ -591,10 +581,6 @@ def iter_complete_blocks(
     for i, b in enumerate(blocks):
         if i in state["emitted"]:
             continue
-        # Block at index i is "done" when:
-        # - a later block (i+1, etc.) has started in the partial — its
-        #   closing brace must have arrived for the next object to open,
-        # - OR we're at the final yield (entire envelope closed).
         next_started = i < n - 1
         if not (next_started or final):
             continue

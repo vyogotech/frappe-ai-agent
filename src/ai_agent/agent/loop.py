@@ -138,10 +138,7 @@ async def run_agent_loop(
                         emitted_any = spoke = True
                         yield ev
         except Exception as exc:
-            # Surface the *endpoint* in the warning so a DNS/host
-            # misconfig is one log line, not an unwound traceback. Attr
-            # names differ across LangChain chat-model classes; we read
-            # whichever happens to exist.
+            # Attribute names differ across LangChain chat-model classes, so read whichever exists.
             llm_endpoint = (
                 getattr(llm, "openai_api_base", None)
                 or getattr(llm, "base_url", None)
@@ -165,10 +162,7 @@ async def run_agent_loop(
         tool_blocks = [b for b in blocks if _is_tool_call(b)]
         non_tool_blocks = [b for b in blocks if not _is_tool_call(b)]
 
-        # Defense: empty envelope (no blocks at all). The schema's
-        # `minItems: 1` should make this unreachable, but a stalled
-        # provider stream can land us here. Retry the same iteration
-        # once with an explicit "emit any block" prod.
+        # Reachable despite the schema's minItems: 1, when a provider stream stalls.
         if not blocks:
             if step == 0:  # only one retry, on the first iteration
                 logger.warning("agent_loop_empty_envelope_retry", step=step)

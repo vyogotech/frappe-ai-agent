@@ -14,12 +14,7 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
         request.state.request_id = request_id
-        # Bind the id into structlog's contextvars so every log emitted
-        # inside this request carries it. Without this, `merge_contextvars`
-        # in logging.py has nothing to merge and the response-header round
-        # trip is correlation-in-name-only. Cleared in `finally` so a
-        # worker reused for a subsequent request without the header doesn't
-        # inherit the prior id.
+        # Bound into structlog's contextvars so every log line in this request carries the id.
         token = structlog.contextvars.bind_contextvars(request_id=request_id)
         try:
             response = await call_next(request)

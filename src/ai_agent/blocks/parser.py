@@ -28,11 +28,8 @@ _BLOCK_TYPE_MAP: dict[str, type[ContentBlock]] = {
     "status_list": StatusListBlock,
 }
 
-# Some smaller models (qwen3.5:9b, etc.) emit chart subtypes as the top-level
-# block type (e.g. <ai-block type="pie">) instead of <ai-block type="chart">
-# with chart_type:"pie" inside. Treat those as chart aliases — the inner JSON
-# is forwarded to ChartBlock with chart_type filled in from the tag when the
-# model omits it. Keep this set in sync with ChartBlock.chart_type Literal.
+# Chart subtypes some models emit as the tag (<ai-block type="pie">) instead of type="chart".
+# Keep in sync with ChartBlock.chart_type.
 _CHART_TYPES: frozenset[str] = frozenset({"bar", "line", "pie", "funnel", "heatmap", "calendar"})
 
 _BLOCK_PATTERN = re.compile(
@@ -72,10 +69,7 @@ def parse_blocks(text: str) -> list[ContentBlock]:
         try:
             data = json.loads(json_str)
             if is_chart_alias:
-                # Alias path: the LLM used <ai-block type="pie"> instead of
-                # the canonical <ai-block type="chart"> with chart_type:"pie".
-                # Populate chart_type from the tag if the inner JSON omitted
-                # it; otherwise trust whatever the inner JSON says.
+                # setdefault: a chart_type in the inner JSON wins over the tag.
                 data.setdefault("chart_type", block_type)
             block = model_cls.model_validate(data)
             blocks.append(validate_block(block))
