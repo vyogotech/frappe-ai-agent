@@ -205,9 +205,9 @@ class TestRepeatDetection:
         events = await _drain(
             run_agent_loop(llm=llm, tool_registry=_FakeRegistry(), user_message="hi")
         )
-        # We see 3 tool_call events then the bail-out text.
+        # The third call is stopped before it is announced: 2 tool_call events, then the bail-out.
         kinds = [e["type"] for e in events]
-        assert kinds.count("tool_call") == 3
+        assert kinds.count("tool_call") == 2
         assert kinds[-1] == "content"
         assert "not making progress" in events[-1]["text"].lower()
 
