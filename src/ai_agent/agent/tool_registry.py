@@ -125,8 +125,9 @@ class ToolRegistry:
             and all(isinstance(b, dict) and b.get("type") == "text" for b in raw)
         ):
             return "\n".join(str(b.get("text", "")) for b in raw)
-        if hasattr(raw, "model_dump"):
-            return json.dumps(raw.model_dump(), ensure_ascii=False)
+        model_dump = getattr(raw, "model_dump", None)
+        if callable(model_dump):
+            return json.dumps(model_dump(), ensure_ascii=False)
         return str(raw)
 
 
