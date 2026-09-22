@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import structlog
 from langchain_core.tools import BaseTool
+
+logger = structlog.get_logger(__name__)
 
 
 def _is_permission_error(exc: Exception) -> bool:
@@ -77,7 +80,10 @@ class ToolRegistry:
         tool = self._by_name[name]
         try:
             raw = await tool.ainvoke(args or {})
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - every tool failure is a result the model reads
+            logger.warning(
+                "tool_call_failed", tool=name, error_type=type(exc).__name__, error=str(exc)[:200]
+            )
             return _exception_to_result(exc)
         # MCP tools return strings, pydantic models, or (langchain-mcp-adapters) a list of
         # content blocks; coerce uniformly. Text blocks become their text: str() of the list
@@ -113,7 +119,7 @@ def _render_args_schema(tool: BaseTool) -> str:
         else:
             # Already a dict — MCP adapter sometimes hands us raw JSON-schema
             schema = dict(args_schema)
-    except Exception:
+    except (TypeError, ValueError):  # pydantic's PydanticUserError is a TypeError
         return "{}"
     hidden = AGENT_ARGS.get(tool.name, set())
     properties = {k: v for k, v in (schema.get("properties") or {}).items() if k not in hidden}

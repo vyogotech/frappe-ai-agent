@@ -200,7 +200,7 @@ class ChatService:
                         session=session_id,
                         limit=20,
                     )
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - a history read never aborts the answer
                     logger.warning(
                         "chat_history_load_failed_using_empty",
                         session_id=session_id,
@@ -223,7 +223,7 @@ class ChatService:
                     role="user",
                     content=message,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - a history write never aborts the answer
                 logger.warning(
                     "chat_history_user_message_write_failed",
                     session_id=session_id,
@@ -250,8 +250,7 @@ class ChatService:
                         raise RuntimeError(
                             f"MCP tools/list timed out after {tools_load_timeout_s:.0f}s"
                         ) from exc
-                    except Exception as exc:
-                        # Soft-fail: without tools the model still answers turns that need no data.
+                    except Exception as exc:  # noqa: BLE001 - without tools the model still answers
                         root: BaseException = exc
                         while isinstance(root, BaseExceptionGroup) and root.exceptions:
                             root = root.exceptions[0]
@@ -412,7 +411,7 @@ class ChatService:
                     tool_args_json=tool_args_json,
                     tool_result_json=tool_result_json,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - a history write never aborts the answer
                 logger.warning(
                     "chat_history_assistant_message_write_failed",
                     session_id=session_id,

@@ -149,7 +149,7 @@ class FrappeHistoryClient:
         session: str,
         limit: int = 20,
     ) -> list[dict[str, str]]:
-        """The last `limit` messages of `session`, oldest first; [] on any failure."""
+        """The last `limit` messages of `session`, oldest first; [] on a Frappe or parse failure."""
         url = f"{self._base_url}/api/method/frappe.client.get_list"
         params = {
             "doctype": "AI Chat Message",
@@ -180,7 +180,7 @@ class FrappeHistoryClient:
                     rows.append({"role": str(r["role"]), "content": content})
             rows.reverse()  # oldest-first for LLM context
             return rows
-        except Exception as exc:
+        except (httpx.HTTPError, ValueError, AttributeError, TypeError) as exc:
             logger.warning(
                 "chat_history_list_failed",
                 session=session,
@@ -234,7 +234,7 @@ class FrappeHistoryClient:
                 )
                 return None
             return match.group(1)
-        except Exception as exc:
+        except httpx.HTTPError as exc:
             logger.warning(
                 "frappe_history_csrf_fetch_failed",
                 error_type=type(exc).__name__,
@@ -266,12 +266,11 @@ class FrappeHistoryClient:
             # Outside the try, which swallows Frappe outages: use-after-close must raise.
             client = self._get_client()
 
-            csrf_token = await self._csrf_token_for(sid)
-            headers: dict[str, str] = {"Cookie": f"sid={sid}"}
-            if csrf_token:
-                headers[_CSRF_HEADER] = csrf_token
-
             try:
+                csrf_token = await self._csrf_token_for(sid)
+                headers: dict[str, str] = {"Cookie": f"sid={sid}"}
+                if csrf_token:
+                    headers[_CSRF_HEADER] = csrf_token
                 response = await client.post(url, json=payload, headers=headers)
 
                 if response.status_code == 400 and _looks_like_csrf_error(response):
@@ -298,7 +297,7 @@ class FrappeHistoryClient:
                 response.raise_for_status()
                 span.set_attribute("status_code", response.status_code)
                 return response.json()["data"]["name"]
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - a history write never aborts the answer
                 # Transport errors (timeout, DNS, refused) have no response, so status_code is None.
                 status_code = getattr(getattr(exc, "response", None), "status_code", None)
                 logger.warning(

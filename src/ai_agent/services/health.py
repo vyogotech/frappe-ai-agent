@@ -34,8 +34,8 @@ class HealthService:
             async with httpx.AsyncClient(timeout=self._settings.health_probe_timeout_s) as client:
                 resp = await client.get(url)
                 return {"ok": resp.status_code == 200}
-        except Exception as e:
-            logger.warning("mcp_health_failed", error=str(e))
+        except Exception as e:  # noqa: BLE001 - a failed probe answers ok: False, never a 500
+            logger.warning("mcp_health_failed", error_type=type(e).__name__, error=str(e))
             return {"ok": False}
 
     async def _check_llm(self) -> dict[str, Any]:
@@ -48,6 +48,6 @@ class HealthService:
             async with httpx.AsyncClient(timeout=self._settings.health_probe_timeout_s) as client:
                 resp = await client.get(url)
                 return {"ok": resp.status_code == 200}
-        except Exception as e:
-            logger.warning("llm_health_failed", error=str(e))
+        except Exception as e:  # noqa: BLE001 - a failed probe answers ok: False, never a 500
+            logger.warning("llm_health_failed", error_type=type(e).__name__, error=str(e))
             return {"ok": False}
