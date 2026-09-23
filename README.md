@@ -94,12 +94,7 @@ Streaming chat endpoint. Returns `text/event-stream`.
 | `error`         | `{ message: str }` — fatal error; followed by `done`                    |
 | `done`          | `{ tools_called: list[str], data_quality, timestamp: str }`             |
 
-`data_quality` is `"high"` only when the turn got everything it went for. It is `"low"` if the
-turn ended in error, if any tool call came back as an error string instead of data, or if Frappe
-refused a history write. A failed tool call is a result the model answers around, so the turn
-still finishes — but the answer it produced rests on less, and says so. The turn's own
-`chat_turn_completed` log line carries the same fact as `degraded`, with `tools_failed_count`
-beside it.
+`data_quality` is `"high"` on success, `"low"` if the turn ended in error.
 
 An `error` message is one plain line per kind of failure — the turn ran past its deadline, the reply was cut off, `tools/list` did not answer in time, or anything else, which reads "The answer could not be completed. Try again." The exception type and its text never reach the client: they are in the turn's own log line (`chat_handle_message_failed`, `chat_tools_load_timed_out`) and on the `agent.chat_turn` span. The same line is what the turn saves as its answer — appended under an `[incomplete]` marker to the text that had already arrived, when there was any — so a reopened chat shows no exception text either.
 
@@ -140,10 +135,6 @@ All settings are loaded from environment or `.env` with the `AI_AGENT_` prefix. 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AI_AGENT_HOST` | `0.0.0.0` | Bind host |
-| `AI_AGENT_PORT` | `8484` | Bind port |
-| `AI_AGENT_WORKERS` | `1` | Uvicorn workers. Wired into the Dockerfile CMD as `uvicorn --workers ${AI_AGENT_WORKERS:-1}`. The agent is stateless per-request (history is fetched from Frappe each turn), but each worker keeps its own count for `AI_AGENT_AGENT_RATE_LIMIT` unless `AI_AGENT_RATE_LIMIT_STORAGE_URI` points them at a shared store, so N workers otherwise let one session make N times that many requests. |
-| `AI_AGENT_CORS_ORIGINS` | `["http://localhost:8000"]` | JSON list of credentialed-CORS origins. `"*"` is not allowed because cookies are forwarded |
 | `AI_AGENT_LLM_PROVIDER` | `ollama` | `ollama`, `openai`, `anthropic`, `google` |
 | `AI_AGENT_LLM_BASE_URL` | `http://localhost:11434` | Provider base URL |
 | `AI_AGENT_LLM_API_KEY` | _empty_ | API key for hosted providers |
@@ -156,11 +147,10 @@ All settings are loaded from environment or `.env` with the `AI_AGENT_` prefix. 
 | `AI_AGENT_AGENT_PROMPT_TEXT_MAX_CHARS` | `8000` | Longest single tool result or history row that may enter the prompt; the rest is cut with a `[truncated to N characters]` marker |
 | `AI_AGENT_AGENT_RECURSION_LIMIT` | `50` | Envelope-loop recursion ceiling — small models need headroom while exploring doctype schemas before converging |
 | `AI_AGENT_AGENT_RATE_LIMIT` | `30/minute` | slowapi-format per-sid rate limit on `POST /api/v1/chat` (e.g. `100/hour`, `10/second`) |
-| `AI_AGENT_RATE_LIMIT_STORAGE_URI` | `memory://` | Where the limiter keeps its counters. The default is this process, so the effective limit is `AI_AGENT_AGENT_RATE_LIMIT` x workers x replicas. Point every process at one `redis://host:6379/0` to share a single budget. A uri `limits` cannot open is refused at startup rather than falling back to the process |
 | `AI_AGENT_MCP_SERVER_URL` | `http://localhost:8080/mcp` | MCP Streamable HTTP endpoint |
 | `AI_AGENT_MCP_TOOLS_LOAD_TIMEOUT_S` | `20.0` | Per-request bound on `tools/list`. A timeout becomes a single SSE `error` event, not a hung stream |
 | `AI_AGENT_MCP_TOOL_TIMEOUT_S` | `30.0` | Bound on one tool call, and on the HTTP and SSE read timeouts of the MCP session under it. A timeout comes back as a tool result the model can answer around |
-| `AI_AGENT_HEALTH_PROBE_TIMEOUT_S` | `2.0` | httpx timeout on each of the agent's own `/health` reachability pings against MCP and Ollama. The two run concurrently on one client, inside the 5 s rag allows `/health?detail` |
+| `AI_AGENT_HEALTH_PROBE_TIMEOUT_S` | `5.0` | Timeout on the agent's own `/health` reachability pings against MCP and Ollama |
 | `AI_AGENT_FRAPPE_URL` | `http://localhost:8000` | Frappe URL for chat history writes |
 | `AI_AGENT_OTEL_ENDPOINT` | _empty_ | OTLP gRPC endpoint. Empty = tracing disabled |
 | `AI_AGENT_OTEL_SERVICE_NAME` | `frappe-ai-agent` | Resource attribute on emitted spans |
@@ -259,7 +249,7 @@ src/ai_agent/
 ```bash
 make install      # uv sync --all-extras
 make serve        # uvicorn --reload on :8484
-make test         # pytest -v
+make test         # pytest -v (unit + BDD)
 make lint         # ruff check
 make format       # ruff format
 make typecheck    # pyright on src/
@@ -273,11 +263,12 @@ Pre-commit hooks (`.pre-commit-config.yaml`) run ruff lint + format and a handfu
 The suite is unit-first:
 
 - **`tests/unit/`** — pure unit tests for every module. Heavy fakes live alongside the tests (e.g. `test_chat_service.py` builds an in-memory graph stub and walks the full event-translation pipeline).
+- **`tests/features/`** — BDD smoke scenarios that exercise the real SSE route in-process via `httpx.ASGITransport`, with a stubbed `ChatService`. Verifies route wiring: 401 on missing sid, happy-path event ordering, exactly-one-error on upstream failure.
 
 Tests marked `@pytest.mark.integration` need real Ollama/MCP/Frappe and are not part of the default run. To enable type-checking of tests, `pyright` is configured to scan both `src/` and `tests/`.
 
 ```bash
-uv run pytest                          # the whole suite
+uv run pytest                          # unit + BDD
 uv run pytest tests/unit/              # unit only
 uv run pytest -m integration           # opt-in, requires real services
 uv run pytest --cov=ai_agent           # coverage
@@ -285,25 +276,24 @@ uv run pytest --cov=ai_agent           # coverage
 
 ## Observability
 
-- **Structured logging** via `structlog`. Default JSON output to stdout; switch to a human-readable renderer with `AI_AGENT_LOG_FORMAT=console`. Libraries that log through the standard library — uvicorn, slowapi, `mcp` — are routed through the same renderer and carry the same `level`, `logger`, `timestamp` and `request_id` fields. `uvicorn.access`, `httpx`, `httpcore` and `mcp` are pinned to WARNING to keep the stream readable.
+- **Structured logging** via `structlog`. Default JSON output to stdout; switch to a human-readable renderer with `AI_AGENT_LOG_FORMAT=console`. `uvicorn.access`, `httpx`, and `httpcore` are pinned to WARNING to keep the stream readable.
 - **Request correlation** — every response carries an `X-Request-ID` header (incoming value echoed if the client sets one, otherwise a fresh UUID). The same id is bound into `structlog.contextvars` for the duration of the request, so any log emitted inside a handler carries `request_id=…` automatically.
-- **Per-turn audit log** — `ChatService.handle_message` emits one info-level `chat_turn_completed` event at the end of every turn with `duration_ms`, `tools_called`, `tools_called_count`, `tools_failed_count`, `content_chars`, `block_events_emitted`, `failed`, `session_id`, and `error_type` on failure. One log line per turn answers "what happened on this chat call" without grepping multiple streams.
+- **Per-turn audit log** — `ChatService.handle_message` emits one info-level `chat_turn_completed` event at the end of every turn with `duration_ms`, `tools_called`, `tools_called_count`, `content_chars`, `block_events_emitted`, `failed`, `session_id`, and `error_type` on failure. One log line per turn answers "what happened on this chat call" without grepping multiple streams.
 - **OpenTelemetry tracing** — set `AI_AGENT_OTEL_ENDPOINT` to an OTLP gRPC collector to enable export. Tracing is off when the env var is empty. Spans emitted per chat turn (nested under the FastAPI auto-instrumented HTTP span):
-  - `agent.chat_turn` (the whole handler — `session_id`, `tools_called_count`, `tools_failed_count`, `content_chars`, `block_events_emitted`, `failed`, `error_type`)
+  - `agent.chat_turn` (the whole handler — `session_id`, `tools_called_count`, `content_chars`, `block_events_emitted`, `failed`, `error_type`)
   - `agent.load_tools` (MCP `tools/list` call — `tool_count`)
   - `agent.run` (the envelope tool-use loop — `tool_count`, `max_steps`)
-  - `execute_tool <name>` (one per tool call, named and attributed as the OpenTelemetry GenAI conventions ask — `gen_ai.operation.name`, `gen_ai.tool.name`, and `error.type` with an ERROR status when the call fails)
   - `agent.history.write` (each Frappe REST write — `kind`, `status_code`, `failed`)
 
   On the failure path the `agent.chat_turn` span carries an ERROR status and the original exception via `record_exception`, so a trace UI bubbles it up.
-- **OpenTelemetry metrics** — one counter is recorded against the OTEL Metrics API, `agent.history.write_failures` (attribute `kind=session|message`). This release installs no `MeterProvider`, so the counter runs against the API's no-op default and nothing is exported: `frappe_history_write_failed` in the log is the signal for a Frappe-write outage. A process that installs its own `MeterProvider` before the first write picks the counter up.
+- **OpenTelemetry metrics** — the OTEL Metrics API is wired with one counter: `agent.history.write_failures` (attribute `kind=session|message`). Lets a Prometheus/OTLP collector alert on sustained Frappe-write outages (e.g. `rate(agent_history_write_failures_total[5m]) > 0`) that the per-call WARN logs alone could not surface.
 
 ## Runbook
 
 Practical "got paged at 3am" diagnosis paths. Each scenario lists the
 visible symptom, the signals to consult, and the remediation. Assumes
-the deployment has `AI_AGENT_LOG_FORMAT=json` (default) and, where a
-trace UI is mentioned, `AI_AGENT_OTEL_ENDPOINT` set.
+the deployment has `AI_AGENT_LOG_FORMAT=json` (default) and the OTEL
+spans / counters from the Operability branch are wired.
 
 ### Chat requests return 500 / clients see `error` events
 
@@ -325,11 +315,8 @@ trace UI is mentioned, `AI_AGENT_OTEL_ENDPOINT` set.
    - LLM unreachable → `agent.run` span error; httpx connect /
      timeout under it
    - Frappe Login expired → tool observations return
-     `Access denied: permission error — …`. The LLM explains them in
-     the reply, and each one is still a `tool_call_failed` log line, an
-     `execute_tool` span with ERROR status, and an `ok: false` row in
-     the assistant message's tool trail, so the turn ends with
-     `data_quality: "low"`.
+     `Access denied: permission error — …` (those are not errors,
+     they're tool results; the LLM should explain them in the reply)
 
 ### MCP `/health?detail=true` reports MCP not OK
 
@@ -350,10 +337,10 @@ Message rows stop appearing in Frappe.
 1. Grep `frappe_history_write_failed` in agent logs — `kind`
    (session/message), `error_type`, and `status_code` (when HTTP)
    identify what's failing.
-2. The `agent.history.write_failures` counter (attribute `kind`)
-   records the same failures, but this release installs no
-   `MeterProvider`, so nothing is exported and there is nothing to
-   alert on yet — count the log events instead.
+2. If you scrape OTEL metrics, `agent.history.write_failures`
+   counter (labels: `kind`) is non-zero. An alert
+   `rate(agent_history_write_failures_total[5m]) > 0` is the right
+   shape for this.
 3. Common causes: Frappe down (transport errors), session cookie
    expired (401), CSRF token wedged (400 with `CSRFTokenError` —
    the client auto-refreshes once, but a sustained block means the
@@ -454,7 +441,9 @@ docker build -t frappe-ai-agent .
 docker run -p 8484:8484 --env-file .env frappe-ai-agent
 ```
 
-The Dockerfile is a two-stage UV build that runs as a non-root user and ships a `HEALTHCHECK` hitting `GET /health`. Its `pip` and `uv` downloads go to BuildKit cache mounts, so a rebuild after a dependency change resolves from the local cache; `docker buildx prune` and `docker system prune` wipe them with the rest of the build cache, `docker buildx prune --filter 'type!=exec.cachemount'` keeps them, and `docker build --no-cache` hands the build an empty mount rather than reusing one. `docker-compose.yml` builds the agent in isolation; `docker-compose.dev.yml.example` shows how to stack it with `frappe-mcp-server` for end-to-end dev.
+The agent listens on `0.0.0.0:8484`, which the start command fixes — the Dockerfile's `CMD` and the Makefile's `serve` target both pass `--host` and `--port` to uvicorn, and no setting overrides them. One variable reaches that command: `AI_AGENT_WORKERS` (default `1`) becomes `uvicorn --workers ${AI_AGENT_WORKERS:-1}`. The agent holds no per-request state, but each worker keeps its own count for `AI_AGENT_AGENT_RATE_LIMIT`, so N workers let one session make N times that many requests. It is read by the container's shell, not by the application, so it belongs in the environment (`--env-file`, compose `env_file:`) and not in a `.env` file the app itself reads.
+
+The Dockerfile is a two-stage UV build that installs the committed `uv.lock`, runs as a non-root user and ships a `HEALTHCHECK` hitting `GET /health`. Its `pip` and `uv` downloads go to BuildKit cache mounts, so a rebuild after a dependency change resolves from the local cache; `docker buildx prune` and `docker system prune` wipe them with the rest of the build cache, `docker buildx prune --filter 'type!=exec.cachemount'` keeps them, and `docker build --no-cache` hands the build an empty mount rather than reusing one. `docker-compose.yml` builds the agent in isolation; `docker-compose.dev.yml.example` shows how to stack it with `frappe-mcp-server` for end-to-end dev.
 
 ## CI
 

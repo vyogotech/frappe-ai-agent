@@ -7,7 +7,6 @@ from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -58,7 +57,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        logger.info("starting", port=settings.port, model=settings.llm_model)
+        logger.info("starting", model=settings.llm_model)
         logger.info("started")
         try:
             yield
@@ -91,15 +90,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 
-    # Middleware
-    # Credentialed, for the sid cookie the frontend forwards; config.py rejects a "*" origin.
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.cors_origins,
-        allow_credentials=True,
-        allow_methods=["POST", "GET", "OPTIONS"],
-        allow_headers=["*"],
-    )
+    # Middleware. No CORS layer: every caller is server to server (ADR-023).
     app.add_middleware(RequestIDMiddleware)
 
     # Routers

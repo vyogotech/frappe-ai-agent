@@ -23,13 +23,6 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
     )
 
-    # Server
-    host: str = "0.0.0.0"
-    port: int = 8484
-    # Matches the Dockerfile's ${AI_AGENT_WORKERS:-1}; each worker keeps its own rate-limit count.
-    workers: int = 1
-    cors_origins: list[str] = ["http://localhost:8000"]
-
     @field_validator("agent_rate_limit")
     @classmethod
     def _rate_limit_parses(cls, v: str) -> str:
@@ -46,18 +39,6 @@ class Settings(BaseSettings):
             storage_from_string(v)
         except ConfigurationError as exc:
             raise ValueError(f"rate_limit_storage_uri: {exc}") from exc
-        return v
-
-    @field_validator("cors_origins")
-    @classmethod
-    def _reject_wildcard_origin(cls, v: list[str]) -> list[str]:
-        # With "*" and allow_credentials=True (app.py), Starlette echoes any Origin back with
-        # credentials, so any site could call the agent as the signed-in user (starlette cors.py).
-        if "*" in v:
-            raise ValueError(
-                'cors_origins cannot contain "*" — credentialed CORS requires '
-                "an explicit origin list"
-            )
         return v
 
     # LLM
