@@ -1,6 +1,7 @@
 {
   "$defs": {
     "ContentBlockEvent": {
+      "additionalProperties": false,
       "properties": {
         "block": {
           "additionalProperties": true,
@@ -21,6 +22,7 @@
       "type": "object"
     },
     "ContentEvent": {
+      "additionalProperties": false,
       "properties": {
         "text": {
           "title": "Text",
@@ -40,6 +42,7 @@
       "type": "object"
     },
     "DoneEvent": {
+      "additionalProperties": false,
       "properties": {
         "data_quality": {
           "enum": [
@@ -83,6 +86,7 @@
       "type": "object"
     },
     "ErrorEvent": {
+      "additionalProperties": false,
       "properties": {
         "message": {
           "title": "Message",
@@ -102,6 +106,7 @@
       "type": "object"
     },
     "SessionEvent": {
+      "additionalProperties": false,
       "properties": {
         "id": {
           "title": "Id",
@@ -121,6 +126,7 @@
       "type": "object"
     },
     "SourcesEvent": {
+      "additionalProperties": false,
       "properties": {
         "items": {
           "items": {
@@ -144,6 +150,7 @@
       "type": "object"
     },
     "ToolCallEvent": {
+      "additionalProperties": false,
       "properties": {
         "arguments": {
           "additionalProperties": true,
@@ -169,6 +176,7 @@
       "type": "object"
     },
     "ToolConfirmEvent": {
+      "additionalProperties": false,
       "description": "A write the user has to allow; the turn ends on it and the tool has not run.",
       "properties": {
         "arguments": {
@@ -200,7 +208,20 @@
       "type": "object"
     }
   },
-  "anyOf": [
+  "discriminator": {
+    "mapping": {
+      "content": "#/$defs/ContentEvent",
+      "content_block": "#/$defs/ContentBlockEvent",
+      "done": "#/$defs/DoneEvent",
+      "error": "#/$defs/ErrorEvent",
+      "session": "#/$defs/SessionEvent",
+      "sources": "#/$defs/SourcesEvent",
+      "tool_call": "#/$defs/ToolCallEvent",
+      "tool_confirm": "#/$defs/ToolConfirmEvent"
+    },
+    "propertyName": "type"
+  },
+  "oneOf": [
     {
       "$ref": "#/$defs/SessionEvent"
     },

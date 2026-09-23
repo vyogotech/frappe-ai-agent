@@ -1,4 +1,4 @@
-.PHONY: install test test-integration lint format typecheck boundaries security workflows serve clean audit audit-clean
+.PHONY: install test test-integration lint format typecheck boundaries security workflows serve clean contract audit audit-clean
 
 install:
 	uv sync --all-extras
@@ -32,6 +32,11 @@ security:
 
 workflows:
 	uvx zizmor --offline .github/workflows
+
+# The published wire contract. frappe_ai and Metis keep their own copies of the envelope and
+# check them against this file, so it is regenerated here and never edited by hand (ADR-004).
+contract:
+	uv run python -c 'import json, pathlib; from ai_agent.transport.sse_events import contract_schema; pathlib.Path("contract/sse-event.schema.json").write_text(json.dumps(contract_schema(), indent=2, sort_keys=True) + chr(10))'
 
 serve:
 	uv run uvicorn ai_agent.app:create_app --factory --host 0.0.0.0 --port 8484 --reload

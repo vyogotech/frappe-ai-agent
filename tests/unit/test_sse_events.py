@@ -68,16 +68,30 @@ class TestValidateEvent:
             validate_event(ev)  # must not raise
 
     def test_missing_type_raises(self):
-        with pytest.raises(ValueError, match="missing required 'type'"):
+        with pytest.raises(ValueError, match="Unable to extract tag"):
             validate_event({"id": "sess-1"})
 
     def test_unknown_type_raises(self):
-        with pytest.raises(ValueError, match="unknown event type"):
+        with pytest.raises(ValueError, match="does not match any of the expected tags"):
             validate_event({"type": "thinking", "message": "foo"})
 
     def test_missing_required_field_raises(self):
-        with pytest.raises(ValueError, match="missing required fields"):
+        with pytest.raises(ValueError, match=r"tool_call\.arguments"):
             validate_event({"type": "tool_call", "name": "list_invoices"})
+
+    def test_undeclared_field_raises(self):
+        # frappe_ai's cancel frame carries this one; a consumer's own copy of the contract
+        # cannot see it, so it is drift rather than a harmless extension (ADR-004).
+        with pytest.raises(ValueError, match=r"done\.cancelled"):
+            validate_event(
+                {
+                    "type": "done",
+                    "tools_called": [],
+                    "data_quality": "high",
+                    "timestamp": "2026-04-14T00:00:00Z",
+                    "cancelled": True,
+                }
+            )
 
     def test_done_without_timestamp_raises(self):
         with pytest.raises(ValueError, match="timestamp"):

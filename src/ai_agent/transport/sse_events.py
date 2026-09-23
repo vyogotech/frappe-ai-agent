@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Literal, NotRequired, TypedDict
+from typing import Annotated, Any, Literal, NotRequired, TypedDict
+
+from pydantic import ConfigDict, Field, TypeAdapter
 
 
 class SessionEvent(TypedDict):
@@ -56,7 +58,9 @@ class DoneEvent(TypedDict):
     usage: NotRequired[dict[str, float]]
 
 
-SSEEvent = (
+# Tagged on `type`, so a bad frame is one error naming the field that is wrong instead of one per
+# branch, and the published schema carries the tag-to-frame mapping a consumer's switch mirrors.
+SSEEvent = Annotated[
     SessionEvent
     | ToolCallEvent
     | ToolConfirmEvent
@@ -64,36 +68,25 @@ SSEEvent = (
     | ContentEvent
     | ContentBlockEvent
     | ErrorEvent
-    | DoneEvent
-)
+    | DoneEvent,
+    Field(discriminator="type"),
+]
 
-# Runtime-check schema: type → set of required field names (excluding "type"
-# itself). Kept as a plain dict so it's introspectable from tests and from
-# the FE if it ever needs to mirror this validation client-side.
-_REQUIRED_FIELDS: dict[str, set[str]] = {
-    "session": {"id"},
-    "tool_call": {"name", "arguments"},
-    "tool_confirm": {"id", "name", "arguments"},
-    "content": {"text"},
-    "content_block": {"block"},
-    "sources": {"items"},
-    "error": {"message"},
-    "done": {"tools_called", "data_quality", "timestamp"},
-}
+# extra=forbid: a field this module does not declare is drift, not an extension — a consumer's
+# own copy of the contract cannot see it, so the schema refuses it instead of dropping it.
+_CONTRACT_ADAPTER = TypeAdapter(SSEEvent, config=ConfigDict(extra="forbid"))
+
+
+# `make contract` writes this to contract/sse-event.schema.json, the published artefact frappe_ai
+# and Metis check their own hand-written copies of these frames against (ADR-004).
+def contract_schema() -> dict[str, Any]:
+    """The envelope as JSON Schema: what `make contract` publishes and the consumers check."""
+    return _CONTRACT_ADAPTER.json_schema()
 
 
 def validate_event(event: dict[str, Any]) -> None:
-    """Raise ValueError unless `event` has a known `type` and its fields; values are unchecked."""
-    if "type" not in event:
-        raise ValueError(f"event missing required 'type' field: {event!r}")
-    kind = event["type"]
-    if kind not in _REQUIRED_FIELDS:
-        raise ValueError(f"unknown event type {kind!r}; expected one of {sorted(_REQUIRED_FIELDS)}")
-    missing = _REQUIRED_FIELDS[kind] - set(event)
-    if missing:
-        raise ValueError(
-            f"event of type {kind!r} missing required fields {sorted(missing)}: {event!r}"
-        )
+    """Raise ValueError unless `event` is exactly one declared frame, every field and no other."""
+    _CONTRACT_ADAPTER.validate_python(event)
 
 
 Event = dict[str, Any]
