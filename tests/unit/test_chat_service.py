@@ -344,10 +344,8 @@ async def test_session_event_announces_created_session_id():
     service = _make_service()
     user_context = UserContext(sid="abc123")
 
-    fake_history = MagicMock()
-    fake_history.create_session = AsyncMock(return_value="sess-created")
-    fake_history.save_message = AsyncMock(return_value="msg-1")
-    fake_history.ensure_session = AsyncMock(side_effect=lambda *, name, **_: name)
+    fake_history = _fake_history()
+    fake_history.create_session.return_value = "sess-created"
     service._history = fake_history
 
     mock_client = MagicMock()
@@ -373,10 +371,8 @@ async def test_session_event_echoes_existing_session_id():
     service = _make_service()
     user_context = UserContext(sid="abc123")
 
-    fake_history = MagicMock()
-    fake_history.create_session = AsyncMock(return_value="should-not-use")
-    fake_history.save_message = AsyncMock(return_value="msg-1")
-    fake_history.ensure_session = AsyncMock(side_effect=lambda *, name, **_: name)
+    fake_history = _fake_history()
+    fake_history.create_session.return_value = "should-not-use"
     service._history = fake_history
 
     mock_client = MagicMock()
@@ -536,10 +532,7 @@ async def test_handle_message_persists_user_message_before_loop():
     service = _make_service()
     user_context = UserContext(sid="abc123")
 
-    fake_history = MagicMock()
-    fake_history.create_session = AsyncMock(return_value="sess-1")
-    fake_history.ensure_session = AsyncMock(side_effect=lambda *, name, **_: name)
-    fake_history.save_message = AsyncMock(return_value="msg-1")
+    fake_history = _fake_history()
     service._history = fake_history
 
     mock_client = MagicMock()
@@ -570,10 +563,9 @@ async def test_handle_message_continues_when_history_writes_fail():
     service = _make_service()
     user_context = UserContext(sid="abc123")
 
-    fake_history = MagicMock()
-    fake_history.create_session = AsyncMock(return_value="sess-1")
-    fake_history.ensure_session = AsyncMock(side_effect=lambda *, name, **_: name)
-    fake_history.save_message = AsyncMock(side_effect=RuntimeError("frappe down"))
+    fake_history = _fake_history()
+    # what the client returns when Frappe refuses the write; it never raises for that
+    fake_history.save_message.return_value = None
     service._history = fake_history
 
     mock_client = MagicMock()
@@ -592,9 +584,10 @@ async def test_handle_message_continues_when_history_writes_fail():
             )
         )
 
-    # Stream finishes despite history write failures.
+    # Stream finishes despite history write failures, and says so.
     assert events[-1]["type"] == "done"
     assert [e for e in events if e["type"] == "error"] == []
+    assert events[-1]["data_quality"] == "low"  # nothing was saved; the answer cannot claim high
 
 
 # --------------------------------------------------------------------------- #
@@ -908,10 +901,7 @@ async def test_handle_message_aclose_mid_stream_does_not_raise():
     service = _make_service()
     user_context = UserContext(sid="abc123")
 
-    fake_history = MagicMock()
-    fake_history.create_session = AsyncMock(return_value="s-aclose")
-    fake_history.save_message = AsyncMock(return_value="m1")
-    fake_history.ensure_session = AsyncMock(side_effect=lambda *, name, **_: name)
+    fake_history = _fake_history()
     service._history = fake_history
 
     mock_client = MagicMock()
@@ -947,9 +937,7 @@ async def test_handle_message_aclose_mid_stream_does_not_raise():
 async def test_assistant_message_keeps_sources_and_blocks():
     """Blocks and passages used to vanish on reload; a passage is kept as a reference (D08)."""
     service = _make_service()
-    fake_history = MagicMock()
-    fake_history.ensure_session = AsyncMock(side_effect=lambda *, name, **_: name)
-    fake_history.save_message = AsyncMock(return_value="msg-1")
+    fake_history = _fake_history()
     service._history = fake_history
     mock_client = MagicMock()
     mock_client.get_tools = AsyncMock(return_value=[])
@@ -1005,9 +993,7 @@ async def test_ollama_decode_counts_reach_done_and_history():
         return _gen()
 
     service = _make_service()
-    service._history = MagicMock()
-    service._history.ensure_session = AsyncMock(side_effect=lambda *, name, **_: name)
-    service._history.save_message = AsyncMock(return_value="msg-1")
+    service._history = _fake_history()
     mock_client = MagicMock()
     mock_client.get_tools = AsyncMock(return_value=[])
     with (

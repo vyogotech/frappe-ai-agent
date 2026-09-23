@@ -215,6 +215,10 @@ class ChatService:
         first_token: float | None = None  # seconds until the first answer text went out
         block_events_emitted = 0
         failed = False
+        # Set where the turn falls short of what its answer implies: a tool call that came back
+        # an error, a row Frappe would not take. `done` carries it, so nothing reports high
+        # quality after nothing worked.
+        degraded = False
         error_message = ""
         error_type: str | None = None
         # Wall-clock timer for the turn-summary log. perf_counter is
@@ -224,6 +228,7 @@ class ChatService:
 
         async def save_answer(content: str, session: str) -> None:
             """Write the assistant row; best-effort, so a history outage never ends the turn."""
+            nonlocal degraded
             tool_args_json: str | None = None
             if tool_invocations:
                 try:
@@ -243,8 +248,11 @@ class ChatService:
                 if sources_seen or blocks_seen or usage
                 else None
             )
+            # The client turns every Frappe failure into None and logs it; nothing is left here
+            # to handle, only to report. The one thing it does raise is a closed pool, and this
+            # save runs after the turn's own handler, so it is caught here or it ends the stream.
             try:
-                await self._history.save_message(
+                saved = await self._history.save_message(
                     sid=user_context.sid,
                     session=session,
                     role="assistant",
@@ -252,13 +260,15 @@ class ChatService:
                     tool_args_json=tool_args_json,
                     tool_result_json=tool_result_json,
                 )
-            except Exception as exc:  # noqa: BLE001 - a history write never aborts the answer
+            except RuntimeError as exc:
                 logger.warning(
-                    "chat_history_assistant_message_write_failed",
+                    "chat_history_closed_before_the_answer_was_saved",
                     session_id=session,
-                    error_type=type(exc).__name__,
                     error=str(exc)[:200],
                 )
+                saved = None
+            if saved is None:
+                degraded = True
 
         turn: dict[str, Any] = {"session_id": session_id, "t0": t0}
         with (
@@ -273,6 +283,7 @@ class ChatService:
                         context_json=json.dumps(context or {}),
                     )
                     if created is None:
+                        degraded = True
                         session_id = f"tmp-{uuid4().hex[:8]}"
                         logger.warning(
                             "chat_history_session_create_failed_using_tmp",
@@ -298,20 +309,11 @@ class ChatService:
                 # Read before the question is saved, so the history holds only earlier turns.
                 history_messages: list[BaseMessage] = []
                 if session_id and not session_id.startswith("tmp-"):
-                    try:
-                        rows = await self._history.list_messages(
-                            sid=user_context.sid,
-                            session=session_id,
-                            limit=20,
-                        )
-                    except Exception as exc:  # noqa: BLE001 - a history read never aborts the answer
-                        logger.warning(
-                            "chat_history_load_failed_using_empty",
-                            session_id=session_id,
-                            error_type=type(exc).__name__,
-                            error=str(exc)[:200],
-                        )
-                        rows = []
+                    rows = await self._history.list_messages(
+                        sid=user_context.sid,
+                        session=session_id,
+                        limit=20,
+                    )
                     for row in rows:
                         content = cap_for_prompt(
                             row["content"], self._settings.agent_prompt_text_max_chars
@@ -324,21 +326,16 @@ class ChatService:
                 # Persist the user's message. Best-effort: a Frappe outage must
                 # not abort the chat turn — log and continue. A confirmed turn has no message of the
                 # user's, and saving the agent's stand-in line would replay it as one next turn.
-                if confirmation is None:
-                    try:
-                        await self._history.save_message(
-                            sid=user_context.sid,
-                            session=session_id,
-                            role="user",
-                            content=user_message,
-                        )
-                    except Exception as exc:  # noqa: BLE001 - a history write never aborts the answer
-                        logger.warning(
-                            "chat_history_user_message_write_failed",
-                            session_id=session_id,
-                            error_type=type(exc).__name__,
-                            error=str(exc)[:200],
-                        )
+                if confirmation is None and (
+                    await self._history.save_message(
+                        sid=user_context.sid,
+                        session=session_id,
+                        role="user",
+                        content=user_message,
+                    )
+                    is None
+                ):
+                    degraded = True
 
                 # Per-request MCP client carrying the caller's sid cookie.
                 mcp_client = build_mcp_client_for_sid(
@@ -473,10 +470,13 @@ class ChatService:
                                 first_token = round(time.monotonic() - started, 3)
                         yield ev
 
+                    # a tool the turn asked for and did not get: the answer is not fully backed
+                    degraded = degraded or bool(_failed_calls(tool_registry.invocations))
+
             except (asyncio.CancelledError, GeneratorExit):
                 # Stop, a dropped socket or a killed worker: the user read the text that arrived,
                 # so keep it before the cancellation finishes unwinding this turn.
-                if assistant_text_parts:
+                if assistant_text_parts and session_id is not None:
                     with anyio.move_on_after(_STOPPED_SAVE_TIMEOUT_S, shield=True):
                         await save_answer(
                             _saved_answer(assistant_text_parts, ANSWER_STOPPED), session_id
@@ -528,7 +528,7 @@ class ChatService:
             yield {
                 "type": "done",
                 "tools_called": tools_called,
-                "data_quality": "low" if failed or tools_failed else "high",
+                "data_quality": "low" if failed or degraded else "high",
                 "timestamp": _utcnow_rfc3339_z(),
                 **({"usage": usage} if usage else {}),
             }
@@ -553,6 +553,7 @@ class ChatService:
                 "content_chars": content_chars,
                 "block_events_emitted": block_events_emitted,
                 "failed": failed,
+                "degraded": degraded,
             }
             if error_type is not None:
                 summary["error_type"] = error_type

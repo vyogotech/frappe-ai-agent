@@ -35,7 +35,7 @@ def _history(rows: list[dict[str, str]] | None = None) -> MagicMock:
     history.create_session = AsyncMock(return_value="sess-1")
     history.ensure_session = AsyncMock(return_value=None)
     history.list_messages = AsyncMock(return_value=rows or [])
-    history.save_message = AsyncMock(return_value=None)
+    history.save_message = AsyncMock(return_value="msg-1")
     history.aclose = AsyncMock(return_value=None)
     return history
 

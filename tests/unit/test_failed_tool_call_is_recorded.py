@@ -45,7 +45,9 @@ async def _turn(*, boom: bool) -> tuple[list[dict[str, Any]], list[dict[str, Any
         llm=_fake_llm_with_yields([[{"blocks": [CALL]}], [{"blocks": [ANSWER]}]]),
         system_prompt_builder=lambda _ctx: "",
         history=MagicMock(
-            save_message=AsyncMock(side_effect=lambda **kw: saved.append(kw)),
+            save_message=AsyncMock(
+                side_effect=lambda **kw: (saved.append(kw), f"m-{len(saved)}")[1]
+            ),
             ensure_session=AsyncMock(return_value="s-1"),
             list_messages=AsyncMock(return_value=[]),
         ),

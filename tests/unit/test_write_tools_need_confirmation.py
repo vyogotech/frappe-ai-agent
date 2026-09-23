@@ -127,8 +127,13 @@ def test_the_summary_falls_back_to_the_tool_when_it_has_no_sentence():
 async def test_the_paused_turn_ends_with_done_and_saves_its_sentence():
     """A turn nobody confirms must finish like any other, not hang waiting for the click."""
     saved: list[dict[str, Any]] = []
+
+    def _remember(**kw: Any) -> str:
+        saved.append(kw)
+        return "msg-1"  # the name Frappe gives the row; None would mean the write failed
+
     history = MagicMock(
-        save_message=AsyncMock(side_effect=lambda **kw: saved.append(kw)),
+        save_message=AsyncMock(side_effect=_remember),
         ensure_session=AsyncMock(return_value="s-1"),
         list_messages=AsyncMock(return_value=[]),
     )

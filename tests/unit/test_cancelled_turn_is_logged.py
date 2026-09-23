@@ -26,6 +26,7 @@ async def test_a_turn_cut_mid_answer_is_logged():
     history = MagicMock(
         save_message=AsyncMock(return_value="m1"),
         ensure_session=AsyncMock(side_effect=lambda *, name, **_: name),
+        list_messages=AsyncMock(return_value=[]),
     )
     client = MagicMock(get_tools=AsyncMock(return_value=[]))
 

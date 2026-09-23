@@ -303,6 +303,7 @@ class FrappeHistoryClient:
                 logger.warning(
                     "frappe_history_write_failed",
                     kind=kind,
+                    session=payload.get("session") or payload.get("name"),
                     error_type=type(exc).__name__,
                     error=str(exc),
                     status_code=status_code,

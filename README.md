@@ -94,7 +94,12 @@ Streaming chat endpoint. Returns `text/event-stream`.
 | `error`         | `{ message: str }` — fatal error; followed by `done`                    |
 | `done`          | `{ tools_called: list[str], data_quality, timestamp: str }`             |
 
-`data_quality` is `"high"` on success, `"low"` if the turn ended in error or if any tool call in it failed — a failed call is a result the model answers around, so the turn still finishes, and the answer it produced rests on less.
+`data_quality` is `"high"` only when the turn got everything it went for. It is `"low"` if the
+turn ended in error, if any tool call came back as an error string instead of data, or if Frappe
+refused a history write. A failed tool call is a result the model answers around, so the turn
+still finishes — but the answer it produced rests on less, and says so. The turn's own
+`chat_turn_completed` log line carries the same fact as `degraded`, with `tools_failed_count`
+beside it.
 
 An `error` message is one plain line per kind of failure — the turn ran past its deadline, the reply was cut off, `tools/list` did not answer in time, or anything else, which reads "The answer could not be completed. Try again." The exception type and its text never reach the client: they are in the turn's own log line (`chat_handle_message_failed`, `chat_tools_load_timed_out`) and on the `agent.chat_turn` span. The same line is what the turn saves as its answer — appended under an `[incomplete]` marker to the text that had already arrived, when there was any — so a reopened chat shows no exception text either.
 
