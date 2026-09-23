@@ -127,6 +127,8 @@ class TestTracing:
     # configured TracerProvider; the install side-effect is irrelevant to
     # what these tests assert, so patch it out.
 
+    # ponytail: reads OTEL's private _active_span_processor; the SDK exposes no public way to
+    # ask a provider what it will export to, so this pins opentelemetry-sdk 1.40's internals.
     def test_no_endpoint_means_no_exporter(self):
         """Without an endpoint the provider still names the service, but ships nothing anywhere."""
         with patch("ai_agent.observability.tracing.trace.set_tracer_provider"):
