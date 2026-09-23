@@ -1,4 +1,5 @@
 import io
+import json
 import logging as stdlib_logging
 import re
 from unittest.mock import patch
@@ -20,14 +21,28 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 class TestLogging:
     def test_setup_json_format(self):
+        """A log line has to be one JSON object: a collector reads it, not a person."""
+        stream = io.StringIO()
         setup_logging(level="info", log_format="json")
-        logger = structlog.get_logger()
-        assert logger is not None
+        stdlib_logging.getLogger().handlers[0].setStream(stream)  # pyright: ignore[reportAttributeAccessIssue]
+        structlog.get_logger("ai_agent.test").info("a_thing_happened", session="chat-1")
+
+        line = json.loads(stream.getvalue().strip())
+        assert line["event"] == "a_thing_happened"
+        assert line["session"] == "chat-1"
+        assert line["level"] == "info"
 
     def test_setup_console_format(self):
+        """The console format is for a person: not JSON, and the level and event are in it."""
+        stream = io.StringIO()
         setup_logging(level="debug", log_format="console")
-        logger = structlog.get_logger()
-        assert logger is not None
+        stdlib_logging.getLogger().handlers[0].setStream(stream)  # pyright: ignore[reportAttributeAccessIssue]
+        structlog.get_logger("ai_agent.test").info("a_thing_happened", session="chat-1")
+
+        out = _ANSI_RE.sub("", stream.getvalue())
+        assert not out.lstrip().startswith("{")
+        assert "a_thing_happened" in out
+        assert "session=chat-1" in out
 
 
 class TestConsoleProcessors:
@@ -112,13 +127,20 @@ class TestTracing:
     # configured TracerProvider; the install side-effect is irrelevant to
     # what these tests assert, so patch it out.
 
-    def test_create_tracer_disabled(self):
+    def test_no_endpoint_means_no_exporter(self):
+        """Without an endpoint the provider still names the service, but ships nothing anywhere."""
         with patch("ai_agent.observability.tracing.trace.set_tracer_provider"):
-            provider = create_tracer_provider(endpoint="", service_name="test")
-        assert provider is not None
+            provider = create_tracer_provider(endpoint="", service_name="frappe-ai-agent")
 
-    def test_create_tracer_with_endpoint(self):
-        # Does not connect, just configures
+        assert provider.resource.attributes["service.name"] == "frappe-ai-agent"
+        assert provider._active_span_processor._span_processors == ()
+
+    def test_an_endpoint_gets_a_batching_otlp_exporter(self):
         with patch("ai_agent.observability.tracing.trace.set_tracer_provider"):
-            provider = create_tracer_provider(endpoint="http://localhost:4317", service_name="test")
-        assert provider is not None
+            provider = create_tracer_provider(
+                endpoint="http://otel.test:4317", service_name="frappe-ai-agent"
+            )
+
+        processors = provider._active_span_processor._span_processors
+        assert [type(p).__name__ for p in processors] == ["BatchSpanProcessor"]
+        assert type(processors[0].span_exporter).__name__ == "OTLPSpanExporter"  # pyright: ignore[reportAttributeAccessIssue]
