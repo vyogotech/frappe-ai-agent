@@ -8,6 +8,7 @@ from httpx import ASGITransport, AsyncClient
 
 from ai_agent.app import create_app
 from ai_agent.config import Settings
+from ai_agent.integrations.frappe_history import FrappeHistoryClient
 from ai_agent.middleware.sid import UserContext, extract_user_context
 from ai_agent.services.chat import ChatService
 from ai_agent.transport.sse import _require_sid
@@ -64,10 +65,13 @@ def _no_events(**_kwargs):
 
 
 async def test_the_tools_failure_warning_holds_no_part_of_the_sid():
+    history = MagicMock(spec=FrappeHistoryClient)
+    history.create_session.return_value = "sess-sid-test"
     service = ChatService(
         settings=Settings(_env_file=None, mcp_server_url="http://mcp:8080/mcp"),  # pyright: ignore[reportCallIssue]
         llm=MagicMock(),
         system_prompt_builder=lambda _ctx: "",
+        history=history,
     )
     client = MagicMock()
     client.get_tools = AsyncMock(side_effect=RuntimeError("mcp down"))

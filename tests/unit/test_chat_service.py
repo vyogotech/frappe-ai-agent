@@ -18,6 +18,7 @@ import pytest
 import structlog
 
 from ai_agent.config import Settings
+from ai_agent.integrations.frappe_history import FrappeHistoryClient
 from ai_agent.middleware.sid import UserContext
 from ai_agent.services.chat import ANSWER_FAILED, ChatService
 
@@ -32,11 +33,22 @@ def _make_settings() -> Settings:
     )
 
 
+def _fake_history() -> MagicMock:
+    """A history client that answers from memory; spec'd, so its async methods are AsyncMocks."""
+    history = MagicMock(spec=FrappeHistoryClient)
+    history.create_session.return_value = "sess-fake"
+    history.ensure_session.side_effect = lambda *, name, **_: name
+    history.save_message.return_value = "msg-fake"
+    history.list_messages.return_value = []
+    return history
+
+
 def _make_service() -> ChatService:
     return ChatService(
         settings=_make_settings(),
         llm=MagicMock(),
         system_prompt_builder=lambda _ctx: "you are helpful",
+        history=_fake_history(),
     )
 
 

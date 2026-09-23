@@ -168,6 +168,9 @@ async def test_sse_chat_route_rate_limits_after_burst():
     )
     app = create_app(settings)
     app.dependency_overrides[_require_sid] = _any_sid
+    # create_app wires the real ChatService; the two requests that pass the limiter would
+    # otherwise run a turn against whatever Frappe, MCP and Ollama are listening on this machine.
+    app.state.chat_service = FakeChatService()
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
