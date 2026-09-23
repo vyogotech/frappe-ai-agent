@@ -96,6 +96,8 @@ Streaming chat endpoint. Returns `text/event-stream`.
 
 `data_quality` is `"high"` on success, `"low"` if the turn ended in error.
 
+An `error` message is one plain line per kind of failure — the turn ran past its deadline, the reply was cut off, `tools/list` did not answer in time, or anything else, which reads "The answer could not be completed. Try again." The exception type and its text never reach the client: they are in the turn's own log line (`chat_handle_message_failed`, `chat_tools_load_timed_out`) and on the `agent.chat_turn` span. The same line is what the turn saves as its answer, so a reopened chat shows no exception text either.
+
 The wire contract is encoded as `TypedDict`s in [`src/ai_agent/transport/sse_events.py`](src/ai_agent/transport/sse_events.py) (`SessionEvent`, `StatusEvent`, `ToolCallEvent`, `ContentEvent`, `ContentBlockEvent`, `ErrorEvent`, `DoneEvent`, plus the `SSEEvent` union). A `validate_event(event: dict)` helper in the same module raises `ValueError` on any drift from the contract — `tests/unit/test_chat_service.py::test_every_emitted_event_matches_sse_contract` runs it over every event the service emits in a typical turn, so adding a new field server-side without updating the TypedDict is caught at CI time, not in a frontend bug report.
 
 ### `GET /health`
@@ -309,8 +311,9 @@ spans / counters from the Operability branch are wired.
    phase blew up.
 3. Common causes:
    - MCP unreachable → `agent.load_tools` span error;
-     `RuntimeError: MCP tools/list timed out after <N>s` (N is from
-     `mcp_tools_load_timeout_s`)
+     `chat_tools_load_timed_out` carries the `timeout_s` that was
+     spent (from `mcp_tools_load_timeout_s`); the client sees only
+     "The assistant's tools timed out. Try again."
    - LLM unreachable → `agent.run` span error; httpx connect /
      timeout under it
    - Frappe Login expired → tool observations return

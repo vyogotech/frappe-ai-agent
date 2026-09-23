@@ -19,7 +19,7 @@ import structlog
 
 from ai_agent.config import Settings
 from ai_agent.middleware.sid import UserContext
-from ai_agent.services.chat import ChatService
+from ai_agent.services.chat import ANSWER_FAILED, ChatService
 
 
 def _make_settings() -> Settings:
@@ -509,7 +509,7 @@ async def test_loop_exception_surfaces_as_error_event():
 
     error_events = [e for e in events if e["type"] == "error"]
     assert len(error_events) == 1
-    assert "loop blew up" in error_events[0]["message"]
+    assert error_events[0]["message"] == ANSWER_FAILED  # C26: the text stays in the log
     assert events[-1]["type"] == "done"
     assert events[-1]["data_quality"] == "low"
 

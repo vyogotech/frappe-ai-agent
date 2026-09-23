@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from langchain_core.messages import BaseMessage
 
 from ai_agent.agent.leak_filter import StreamingLeakFilter
-from ai_agent.agent.loop import cap_for_prompt, run_agent_loop
+from ai_agent.agent.loop import TurnFailure, cap_for_prompt, run_agent_loop
 from ai_agent.agent.prompts import build_system_prompt
 from ai_agent.agent.tool_registry import ToolRegistry
 from ai_agent.config import Settings
@@ -41,6 +41,8 @@ SystemPromptBuilder = Callable[[dict[str, Any]], str]
 _TITLE_MAX_LEN = 60
 
 TURN_TOO_LONG = "This took too long. Try a shorter question."
+TOOLS_TIMED_OUT = "The assistant's tools timed out. Try again."
+ANSWER_FAILED = "The answer could not be completed. Try again."
 
 # MCP tools/list timeout moved to Settings.mcp_tools_load_timeout_s so ops
 # can tune it per-environment (slow LAN, busy MCP). The constant lookup
@@ -60,12 +62,12 @@ async def _until(
         except StopAsyncIteration:
             return
         except TimeoutError as exc:
-            raise TimeoutError(TURN_TOO_LONG) from exc
+            raise TurnFailure(TURN_TOO_LONG) from exc
         yield event
 
 
 def _tools_unavailable_message(root: BaseException) -> str:
-    """Map a tool-load root cause to a user-facing SSE error string."""
+    """Map a tool-load root cause to the tool-status note put in the model's prompt."""
     if isinstance(root, httpx.HTTPStatusError):
         status = root.response.status_code
         if status in (401, 403):
@@ -271,9 +273,13 @@ class ChatService:
                         # Timeout deserves an explicit error event — the user
                         # likely waited the full window and is still owed a
                         # response.
-                        raise RuntimeError(
-                            f"MCP tools/list timed out after {tools_load_timeout_s:.0f}s"
-                        ) from exc
+                        logger.warning(
+                            "chat_tools_load_timed_out",
+                            session_id=session_id,
+                            mcp_url=self._settings.mcp_server_url,
+                            timeout_s=tools_load_timeout_s,
+                        )
+                        raise TurnFailure(TOOLS_TIMED_OUT) from exc
                     except Exception as exc:  # noqa: BLE001 - without tools the model still answers
                         root: BaseException = exc
                         while isinstance(root, BaseExceptionGroup) and root.exceptions:
@@ -396,13 +402,10 @@ class ChatService:
                 # captures the type/message/stacktrace as a span event.
                 turn_span.record_exception(exc)
                 turn_span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
-                # Deliberate: the user gets the type and first line; the traceback stays in the log.
-                first_line = str(display_exc).splitlines()[0] if str(display_exc) else ""
-                detail = first_line[:500]
+                # One plain line per kind of failure: only a TurnFailure carries a line written for
+                # the user, and every other exception's type and text stay in the log above.
                 error_message = (
-                    f"{type(display_exc).__name__}: {detail}"
-                    if detail
-                    else type(display_exc).__name__
+                    str(display_exc) if isinstance(display_exc, TurnFailure) else ANSWER_FAILED
                 )
                 yield {"type": "error", "message": error_message}
 

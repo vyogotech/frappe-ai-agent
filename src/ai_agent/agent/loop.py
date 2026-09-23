@@ -57,6 +57,11 @@ def _as_data(results: str) -> str:
 
 REPLY_CUT_OFF = "The answer was cut short. Try a narrower question."
 
+
+class TurnFailure(RuntimeError):
+    """A turn the agent ended itself: its message is the line the user sees, so keep it plain."""
+
+
 # what each provider calls "ran out of room"; miss one and a cut-off answer reads as a whole one
 _CUT_OFF_REASONS = frozenset(
     {
@@ -161,7 +166,7 @@ async def run_agent_loop(
             # The envelope stops wherever the tokens ran out, so its last block — a tool call's
             # arguments, a number, a sentence — is whatever had been written by then.
             logger.warning("agent_loop_reply_cut_off", step=step)
-            raise RuntimeError(REPLY_CUT_OFF)
+            raise TurnFailure(REPLY_CUT_OFF)
 
         final_envelope = last_partial or {"blocks": []}
         blocks: list[dict[str, Any]] = list(final_envelope.get("blocks") or [])
