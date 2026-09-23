@@ -3,3 +3,11 @@
 # which gitleaks reads as a generic api key; the working tree now uses a string no scanner can mistake, and this
 # line covers the commit that is already written.
 9db448e19748f6d8785dff50948b92a1565cacdf:tests/unit/test_confirmed_turn.py:generic-api-key:23
+
+# A fixture, not a secret: the fake Guest token in the T09 test that asserts each trust-boundary guard
+# refuses the caller it is there to refuse. It was a 32-character hex run when these commits were made,
+# which gitleaks reads as a generic api key; the working tree now uses a string no scanner can mistake
+# (frappe-ai-agent@ad905ed), and these two lines cover the commits that are already written — the one
+# made in the writer's worktree and the one cherry-picked onto main.
+76ec8b83cc6f772562e995714029a6c97345166d:tests/unit/test_trust_boundaries.py:generic-api-key:22
+a67aae919643a66876d4e49de541903cc282b80d:tests/unit/test_trust_boundaries.py:generic-api-key:22
