@@ -47,15 +47,19 @@ jobs:
     timeout-minutes: 30
     needs: [lint, typecheck]
     env:
-      # Versions / model pinned here so a single edit moves the whole job.
-      FRAPPE_BRANCH: version-15
+      # What ragbot's Makefile, compose.demo.yaml and apps.json ship; one edit moves the job
+      FRAPPE_BRANCH: version-16
       FRAPPE_PY: "3.12"
       OLLAMA_MODEL: qwen3:0.6b
+      OLLAMA_IMAGE: ollama/ollama:0.34.1
       MCP_REPO: vyogotech/frappe-mcp-server
+      MCP_REF: 5c8fa163acf157ffb738b7d4a6923f3c3ddf6c1f
       FRAPPE_AI_REPO: vyogotech/frappe_ai
+      # a branch, not a commit: ragbot's apps.json installs frappe_ai by branch too
+      FRAPPE_AI_REF: main
     services:
       mariadb:
-        image: mariadb:10.6
+        image: mariadb:12.3.3
         env:
           MARIADB_ROOT_PASSWORD: travis
         ports:
@@ -66,11 +70,11 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       redis-cache:
-        image: redis:alpine
+        image: redis:8.6-alpine
         ports:
           - 13000:6379
       redis-queue:
-        image: redis:alpine
+        image: redis:8.6-alpine
         ports:
           - 11000:6379
     steps:
@@ -87,17 +91,17 @@ jobs:
         with:
           node-version: "24"
 
-      # Stay on v5: setup-go@v6 sets GOTOOLCHAIN=local, which prevents
-      # the auto-toolchain download Go 1.21+ does for go.mod files that
-      # require a newer Go than the one setup-go installed. The build
-      # target — vyogotech/frappe-mcp-server — declares `go 1.25.0` in
-      # its go.mod (verified 2026-05-13). With v6 + go-version: "1.23"
-      # the build would fail; v5 still works because v5 lets Go fetch
-      # 1.25 at build time. Bump alongside go-version: "1.25" when both
-      # are touched together.
-      - uses: actions/setup-go@v5
+      - name: Fetch frappe-mcp-server
+        uses: actions/checkout@v6
         with:
-          go-version: "1.23"
+          repository: ${{ env.MCP_REPO }}
+          ref: ${{ env.MCP_REF }}
+          path: mcp-src
+
+      # go-version-file needs mcp-src on disk, so the checkout above comes first
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: mcp-src/go.mod
 
       - uses: astral-sh/setup-uv@v8.1.0
 
@@ -122,7 +126,7 @@ jobs:
 
       - name: Start Ollama
         run: |
-          docker run -d --name ollama -p 11434:11434 ollama/ollama:latest
+          docker run -d --name ollama -p 11434:11434 "$OLLAMA_IMAGE"
           # Daemon binds the port before the model index is ready; poll until /api/tags answers.
           for _ in $(seq 1 30); do
             if curl -sf http://localhost:11434/api/tags >/dev/null; then break; fi
@@ -131,7 +135,7 @@ jobs:
           docker exec ollama ollama pull "$OLLAMA_MODEL"
 
       - name: Install frappe-bench
-        run: pip install frappe-bench
+        run: pip install "frappe-bench==5.31.0"
 
       - name: bench init (Frappe ${{ env.FRAPPE_BRANCH }})
         run: |
@@ -152,7 +156,7 @@ jobs:
       - name: Install frappe_ai (provides AI Chat Session / AI Chat Message DocTypes)
         working-directory: frappe-bench
         run: |
-          bench get-app --skip-assets "https://github.com/${FRAPPE_AI_REPO}.git"
+          bench get-app --skip-assets --branch "$FRAPPE_AI_REF" "https://github.com/${FRAPPE_AI_REPO}.git"
 
       - name: Create test site + install frappe_ai
         working-directory: frappe-bench
@@ -187,10 +191,8 @@ jobs:
           echo "frappe failed to start"; tail -200 ../frappe.log; exit 1
 
       - name: Build frappe-mcp-server
-        run: |
-          git clone --depth=1 "https://github.com/${MCP_REPO}.git" mcp-src
-          cd mcp-src
-          go build -o ../mcp-server ./
+        working-directory: mcp-src
+        run: go build -o ../mcp-server ./
 
       - name: Generate MCP config
         run: |
