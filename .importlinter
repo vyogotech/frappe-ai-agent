@@ -15,7 +15,7 @@ containers =
     ai_agent
 
 [importlinter:contract:leaves]
-name = blocks and middleware are leaves
+name = blocks and middleware do not import upwards
 type = forbidden
 source_modules =
     ai_agent.blocks

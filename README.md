@@ -283,13 +283,17 @@ src/ai_agent/
 ## Development
 
 ```bash
-make install      # uv sync --all-extras
-make serve        # uvicorn --reload on :8484
-make test         # pytest -v (unit + BDD)
-make lint         # ruff check
-make format       # ruff format
-make typecheck    # pyright on src/
-make clean        # remove __pycache__ / *.egg-info
+make install          # uv sync --all-extras
+make serve            # uvicorn --reload on :8484
+make test             # pytest tests/unit/ with coverage
+make test-integration # pytest tests/integration/, needs Ollama, MCP and a Frappe bench
+make lint             # ruff check and ruff format --check
+make format           # ruff format
+make typecheck        # pyright over src and tests
+make boundaries       # the .importlinter layer contracts
+make security         # semgrep, bandit and pip-audit
+make workflows        # zizmor over .github/workflows
+make clean            # remove __pycache__ / *.egg-info
 ```
 
 Pre-commit hooks (`.pre-commit-config.yaml`) run ruff lint + format and a handful of file hygiene checks. Install with `pre-commit install`.
