@@ -7,28 +7,38 @@ AI agent service for Frappe/ERPNext — natural-language questions in, structure
 
 ## Overview
 
-`frappe-ai-agent` is the backend that powers the AI sidebar in a Frappe/ERPNext deployment. The browser POSTs a user message; the agent runs a custom envelope-based tool-use loop, calls ERPNext tools through `frappe-mcp-server`, and streams back a mix of prose and rich content blocks (charts, tables, KPI cards, status lists) for the frontend to render.
+`frappe-ai-agent` is the backend that powers the AI sidebar in a Frappe/ERPNext deployment. A Frappe background job posts the user's message on their behalf; the agent runs a custom envelope-based tool-use loop, calls ERPNext tools through `frappe-mcp-server`, and streams back a mix of prose and rich content blocks (charts, tables, KPI cards, status lists) for the frontend to render.
 
 Three design points are load-bearing:
 
-1. **Permissions stay in Frappe.** The browser forwards the user's `sid` cookie on every chat request. The agent authenticates the request from that cookie and forwards the same `sid` to MCP for every tool call, so each tool runs under the caller's Frappe user — no shadow admin account, no permission re-implementation.
+1. **Permissions stay in Frappe.** The caller's `sid` cookie travels with every chat request — the browser sends it to Frappe, and Frappe's relay job forwards it here. The agent authenticates the request from that cookie and forwards the same `sid` to MCP for every tool call, so each tool runs under the caller's Frappe user — no shadow admin account, no permission re-implementation.
 2. **No fabrication.** The system prompt forbids inventing data; every value must come from a tool call in the same turn. Tool errors are folded back into the conversation as observations so the LLM can explain what failed instead of aborting.
 3. **Envelope-protocol streaming.** The LLM emits a single JSON envelope per turn whose blocks are one of `tool_call | text | table | chart | kpi | status_list`. The agent loop runs tool-call blocks itself and re-prompts; non-tool blocks become `content` / `content_block` SSE events. The browser sees discrete typed events, not partial markup.
 
 ## Architecture
 
-```
-Browser (Vue sidebar)
-   │  POST /api/v1/chat  (SSE, Cookie: sid=...)
+```text
+Browser (the Vue sidebar in the Frappe desk, or Metis at /ask)
+   │  1. subscribe to frappe_ai:chunk:<session_id>   (socket.io)
+   │  2. POST frappe_ai.api.chat.start_stream        (a whitelisted method, Cookie: sid=...)
+   ▼
+Frappe web worker — enqueues the relay on the `long` queue and returns at once
+   ▼
+RQ worker
+   │  POST /api/v1/chat  (SSE, the caller's sid forwarded)
    ▼
 frappe-ai-agent  (FastAPI + envelope tool-use loop)
    │
-   ├──▶ LLM provider                (Ollama / OpenAI / Anthropic / Google)
+   ├──▶ LLM provider                (Ollama; OpenAI / Anthropic / Google with that extra)
    ├──▶ frappe-mcp-server           (MCP Streamable HTTP, sid forwarded)
    │       ▼
    │    ERPNext REST API            (runs as the caller)
    └──▶ Frappe REST                 (AI Chat Session / AI Chat Message)
 ```
+
+The RQ worker republishes each SSE frame with `frappe.publish_realtime`, and the browser reads
+the answer from its subscription. No browser talks to this service directly, which is why it
+carries no CORS layer.
 
 Per chat request, `ChatService.handle_message` does the following:
 
@@ -42,7 +52,7 @@ Per chat request, `ChatService.handle_message` does the following:
 
 ## Quick start
 
-**Prerequisites**
+### Prerequisites
 
 - Python 3.12+
 - [UV](https://docs.astral.sh/uv/) for dependency management
@@ -84,21 +94,25 @@ Streaming chat endpoint. Returns `text/event-stream`.
 
 **Response stream** — newline-delimited `data: <json>\n\n` frames. Event types:
 
-| `type`          | Payload                                                                 |
-|-----------------|-------------------------------------------------------------------------|
-| `session`       | `{ id: str }` — sent once, before any other event                       |
-| `status`        | `{ message: str }` — informational (reserved for future use)            |
-| `tool_call`     | `{ name: str, arguments: dict }` — emitted when the agent invokes a tool |
-| `content`       | `{ text: str }` — prose token chunks (streams as the LLM generates)     |
-| `content_block` | `{ block: dict }` — a complete parsed content block (chart, table, …)   |
-| `error`         | `{ message: str }` — fatal error; followed by `done`                    |
-| `done`          | `{ tools_called: list[str], data_quality, timestamp: str }`             |
+| `type` | Payload |
+| --- | --- |
+| `session` | `{ id: str }` — sent once, before any other event |
+| `tool_call` | `{ name: str, arguments: dict }` — emitted when the agent invokes a tool |
+| `tool_confirm` | `{ id: str, name: str, arguments: dict }` — a write the user must allow; the turn ends on it and the tool has **not** run |
+| `content` | `{ text: str }` — prose token chunks (streams as the LLM generates) |
+| `content_block` | `{ block: dict }` — a complete parsed content block (chart, table, …) |
+| `sources` | `{ items: list[dict] }` — the passages an answer used |
+| `error` | `{ message: str }` — fatal error; followed by `done` |
+| `done` | `{ tools_called: list[str], data_quality, timestamp: str, usage?: dict }` |
 
-`data_quality` is `"high"` on success, `"low"` if the turn ended in error.
+`data_quality` is `"high"` on success, `"low"` if the turn ended in error. `usage` is present
+only when there is something to report: `output_tokens` and `output_seconds` when the provider
+reports its own decode counts (Ollama does; hosted providers do not), and `first_token_s`, the
+seconds from the question to the first answer text.
 
 An `error` message is one plain line per kind of failure — the turn ran past its deadline, the reply was cut off, `tools/list` did not answer in time, or anything else, which reads "The answer could not be completed. Try again." The exception type and its text never reach the client: they are in the turn's own log line (`chat_handle_message_failed`, `chat_tools_load_timed_out`) and on the `agent.chat_turn` span. The same line is what the turn saves as its answer — appended under an `[incomplete]` marker to the text that had already arrived, when there was any — so a reopened chat shows no exception text either.
 
-The wire contract is encoded as `TypedDict`s in [`src/ai_agent/transport/sse_events.py`](src/ai_agent/transport/sse_events.py) (`SessionEvent`, `StatusEvent`, `ToolCallEvent`, `ContentEvent`, `ContentBlockEvent`, `ErrorEvent`, `DoneEvent`, plus the `SSEEvent` union). A `validate_event(event: dict)` helper in the same module raises `ValueError` on any drift from the contract — `tests/unit/test_chat_service.py::test_every_emitted_event_matches_sse_contract` runs it over every event the service emits in a typical turn, so adding a new field server-side without updating the TypedDict is caught at CI time, not in a frontend bug report.
+The wire contract is encoded as `TypedDict`s in [`src/ai_agent/transport/sse_events.py`](src/ai_agent/transport/sse_events.py) (`SessionEvent`, `ToolCallEvent`, `ToolConfirmEvent`, `ContentEvent`, `ContentBlockEvent`, `SourcesEvent`, `ErrorEvent`, `DoneEvent`, plus the `SSEEvent` union). A `validate_event(event: dict)` helper in the same module raises `ValueError` on any drift from the contract — `tests/unit/test_chat_service.py::test_every_emitted_event_matches_sse_contract` runs it over every event the service emits in a typical turn, so adding a new field server-side without updating the TypedDict is caught at CI time, not in a frontend bug report.
 
 ### `GET /health`
 
@@ -108,18 +122,18 @@ Lightweight liveness check: `{"status": "ok"}`.
 
 ### `GET /config`
 
-Returns the resolved LLM provider, model, base URL, and MCP server URL. Useful for the frontend to render a "connected to: …" indicator.
+Returns the resolved LLM provider, model, base URL, Ollama context window (`llm_num_ctx`) and MCP server URL. Useful for the frontend to render a "connected to: …" indicator.
 
 ## Content blocks
 
 The LLM wraps structured data in `<ai-block type="...">{ JSON }</ai-block>` tags. The block JSON is validated against a Pydantic model, capped at sane size limits, and streamed to the frontend as a single `content_block` event.
 
-| Block         | Purpose                       | Cap                              |
-|---------------|-------------------------------|----------------------------------|
-| `chart`       | Bar / line / pie / funnel / heatmap / calendar via ECharts | 500 datapoints per dataset       |
-| `table`       | Sortable rows + columns with optional row→doc link | 100 rows                         |
-| `kpi`         | Horizontal row of metric cards | 8 metrics                        |
-| `status_list` | Colored status entries        | 50 items                         |
+| Block | Purpose | Cap |
+| --- | --- | --- |
+| `chart` | Bar / line / pie / funnel / heatmap / calendar via ECharts | 500 datapoints per dataset |
+| `table` | Sortable rows + columns with optional row→doc link | 100 rows |
+| `kpi` | Horizontal row of metric cards | 8 metrics |
+| `status_list` | Colored status entries | 50 items |
 
 Tolerances:
 
@@ -131,10 +145,15 @@ The full schemas are in `src/ai_agent/blocks/models.py`.
 
 ## Configuration
 
-All settings are loaded from environment or `.env` with the `AI_AGENT_` prefix. Unknown keys with the prefix cause startup to fail rather than silently being ignored.
+All settings are loaded from the environment or from `.env`, with the `AI_AGENT_` prefix. The
+two sources treat an unknown key differently, which is pydantic-settings' own behaviour: a key in
+the `.env` file that names no setting fails startup with a `ValidationError`, while an unknown
+variable in the process environment is dropped before validation and the agent starts. A
+container configured with `--env-file` or compose's `env_file:` takes the second path, so a typo
+there is silent — check the resolved values on `GET /config`.
 
 | Variable | Default | Description |
-|----------|---------|-------------|
+| --- | --- | --- |
 | `AI_AGENT_LLM_PROVIDER` | `ollama` | `ollama`, `openai`, `anthropic`, `google` |
 | `AI_AGENT_LLM_BASE_URL` | `http://localhost:11434` | Provider base URL |
 | `AI_AGENT_LLM_API_KEY` | _empty_ | API key for hosted providers |
@@ -145,7 +164,7 @@ All settings are loaded from environment or `.env` with the `AI_AGENT_` prefix. 
 | `AI_AGENT_LLM_REQUEST_TIMEOUT_S` | `60.0` | Bound on one model call, as the httpx timeout under the provider client. Ollama's own client default is no timeout at all |
 | `AI_AGENT_AGENT_TURN_TIMEOUT_S` | `90.0` | Wall-clock bound on one chat turn. On expiry the turn ends with an `error` event and `done` with `data_quality: "low"` |
 | `AI_AGENT_AGENT_PROMPT_TEXT_MAX_CHARS` | `8000` | Longest single tool result or history row that may enter the prompt; the rest is cut with a `[truncated to N characters]` marker |
-| `AI_AGENT_AGENT_RECURSION_LIMIT` | `50` | Envelope-loop recursion ceiling — small models need headroom while exploring doctype schemas before converging |
+| `AI_AGENT_AGENT_RECURSION_LIMIT` | `50` | Envelope-loop ceiling. The loop runs half of it (25) model-tool rounds per turn, since a round is one model call plus its tool calls; small models need the headroom while exploring doctype schemas before converging |
 | `AI_AGENT_AGENT_RATE_LIMIT` | `30/minute` | slowapi-format per-sid rate limit on `POST /api/v1/chat` (e.g. `100/hour`, `10/second`) |
 | `AI_AGENT_MCP_SERVER_URL` | `http://localhost:8080/mcp` | MCP Streamable HTTP endpoint |
 | `AI_AGENT_MCP_TOOLS_LOAD_TIMEOUT_S` | `20.0` | Per-request bound on `tools/list`. A timeout becomes a single SSE `error` event, not a hung stream |
@@ -165,7 +184,7 @@ Every wait a turn can make sits inside the one above it, so the innermost failur
 the one the user hears about:
 
 | Bound | Setting | Default | Why it sits there |
-|-------|---------|---------|-------------------|
+| --- | --- | --- | --- |
 | Turn deadline | `AI_AGENT_AGENT_TURN_TIMEOUT_S` | 90 s | Outermost inside the agent, and inside its caller's: `frappe_ai` reads the stream with its own timeout (120 s by default) and kills the relay job at that plus 30 s. At 90 s the agent's own `error` and `done` still reach the browser instead of the relay's generic failure. |
 | Model call | `AI_AGENT_LLM_REQUEST_TIMEOUT_S` | 60 s | Inside the turn, so one stuck call fails while the turn still has time to report it. It is an httpx timeout, so on a streaming call it bounds the wait for the next chunk, not the whole answer — a model that keeps emitting is ended by the turn deadline. |
 | Tool call | `AI_AGENT_MCP_TOOL_TIMEOUT_S` | 30 s | Inside the turn, and short enough that a few calls still fit in one. A timeout comes back as a tool result, not a failed turn, so the model can answer around it. |
@@ -190,13 +209,24 @@ The default config targets a local Ollama running `qwen3.5:9b`. The system promp
 
 Tools are loaded per-request from `frappe-mcp-server` via the Streamable HTTP transport (`langchain-mcp-adapters`). A new MCP client is built for every chat turn so the caller's `sid` cookie can be attached as a request header — sharing clients across users would leak sessions.
 
-`tools/list` is bounded by `AI_AGENT_MCP_TOOLS_LOAD_TIMEOUT_S` (default 20 s). If MCP is unreachable, the user sees a single SSE `error` event and a `done` frame; the stream does not hang.
+`tools/list` is bounded by `AI_AGENT_MCP_TOOLS_LOAD_TIMEOUT_S` (default 20 s). Only a timeout on
+that call ends the turn: the user sees one SSE `error` event ("The assistant's tools timed out.
+Try again.") and a `done` frame, and the stream does not hang. **Any other tool-load failure soft-
+degrades**: the agent logs `chat_tools_load_failed_soft_degrade`, carries on with an empty tool
+registry, and tells the model in its prompt that tools are unavailable, so a conversational
+question is still answered and a data question comes back as "I can't fetch that right now"
+rather than as invented numbers.
 
 `ToolRegistry.ainvoke` catches every tool exception (MCP errors, Frappe permission denials, httpx timeouts) and surfaces it to the LLM as a string observation rather than aborting the loop. Permission errors get a clearer prefix (`Access denied: permission error — …`).
 
 ## Multi-turn state
 
-The agent does NOT yet replay prior turns into the LLM context — `run_agent_loop` is called with `history=None`. Frappe still persists every turn into `AI Chat Message` (used for sidebar scrollback and offline review), but the LLM only sees the current turn's user message. Destructive operations therefore require both the request and its confirmation in the same conversation thread to be impossible — by design, the agent refuses until per-turn history wiring is added.
+Prior turns are replayed. Before the question is saved, the agent reads up to the last 20 rows of
+the conversation from `AI Chat Message` (`list_messages(limit=20)`, newest first, then reversed,
+so it keeps the latest turns) and passes them to `run_agent_loop` as `history`; each row is cut
+to `AI_AGENT_AGENT_PROMPT_TEXT_MAX_CHARS` first. A failed turn's `[error]` row is skipped, so the
+model never replays its own failure text. When the history read fails, the turn continues with an
+empty history and logs `chat_history_load_failed_using_empty`.
 
 ## Chat history
 
@@ -213,15 +243,17 @@ History writes are **best-effort** — failures are logged but never abort the c
 
 ## Project layout
 
-```
+```text
 src/ai_agent/
 ├── app.py                       FastAPI factory + lifespan + middleware wiring
 ├── config.py                    Pydantic settings (env-var loader)
 ├── agent/
 │   ├── loop.py                  Envelope-driven tool-use loop
 │   ├── prompts.py               System prompt template + page/currency builder
+│   ├── leak_filter.py           Output-side system-prompt leak filter
 │   └── tool_registry.py         Tool dispatcher with per-tool error handling
 ├── blocks/
+│   ├── envelope.py              The JSON envelope schema and its streaming splitter
 │   ├── models.py                Pydantic models for chart/table/kpi/status_list
 │   ├── parser.py                Extract <ai-block> markup → typed blocks
 │   └── validators.py            Size caps (rows/datapoints/metrics/items)
@@ -236,7 +268,7 @@ src/ai_agent/
 │   ├── logging.py               structlog JSON / console output
 │   └── tracing.py               OTLP tracer provider
 ├── services/
-│   ├── chat.py                  Per-request graph orchestration + SSE event mapping
+│   ├── chat.py                  Per-request turn orchestration + SSE event mapping
 │   └── health.py                MCP + Ollama probes
 └── transport/
     ├── sse.py                   POST /api/v1/chat
@@ -262,7 +294,7 @@ Pre-commit hooks (`.pre-commit-config.yaml`) run ruff lint + format and a handfu
 
 The suite is unit-first:
 
-- **`tests/unit/`** — pure unit tests for every module. Heavy fakes live alongside the tests (e.g. `test_chat_service.py` builds an in-memory graph stub and walks the full event-translation pipeline).
+- **`tests/unit/`** — pure unit tests for every module. Heavy fakes live alongside the tests (e.g. `test_chat_service.py` stands in for `run_agent_loop` and walks the full event-translation pipeline).
 - **`tests/features/`** — BDD smoke scenarios that exercise the real SSE route in-process via `httpx.ASGITransport`, with a stubbed `ChatService`. Verifies route wiring: 401 on missing sid, happy-path event ordering, exactly-one-error on upstream failure.
 
 Tests marked `@pytest.mark.integration` need real Ollama/MCP/Frappe and are not part of the default run. To enable type-checking of tests, `pyright` is configured to scan both `src/` and `tests/`.
@@ -292,8 +324,9 @@ uv run pytest --cov=ai_agent           # coverage
 
 Practical "got paged at 3am" diagnosis paths. Each scenario lists the
 visible symptom, the signals to consult, and the remediation. Assumes
-the deployment has `AI_AGENT_LOG_FORMAT=json` (default) and the OTEL
-spans / counters from the Operability branch are wired.
+the deployment has `AI_AGENT_LOG_FORMAT=json` (default) and an OTLP
+endpoint set (`AI_AGENT_OTEL_ENDPOINT`), so the spans and counters
+described under Observability are exported.
 
 ### Chat requests return 500 / clients see `error` events
 
@@ -359,15 +392,18 @@ Message rows stop appearing in Frappe.
    **do not** consume a token from the IP-keyed bucket, so a spray
    from one IP cannot lock out shared-NAT users.
 
-### Agent loops past the recursion limit
+### The agent runs out of steps
 
-**Symptoms:** `chat_handle_message_failed` log with `root_cause_type`
-mentioning `GraphRecursionError`.
+**Symptoms:** `agent_loop_max_steps_exhausted` in the log, and an
+answer that reads "I couldn't converge on an answer within N steps.
+Try a more specific question." This is not an error: the turn ends
+with that text, a normal `done` frame and `data_quality: "high"`.
 
 1. The agent is stuck exploring schemas without converging — common
    with small local models on complex multi-doctype queries.
 2. Short-term: bump `AI_AGENT_AGENT_RECURSION_LIMIT` (default 50;
-   75-100 is reasonable for a small model on a heavy query).
+   75-100 is reasonable for a small model on a heavy query). The loop
+   runs half that many model-tool rounds, so 50 means 25 steps.
 3. Longer-term: a larger model (qwen2.5:14b+) usually fixes this.
 
 ### SSE stream hangs / never closes
@@ -447,11 +483,14 @@ The Dockerfile is a two-stage UV build that installs the committed `uv.lock`, ru
 
 ## CI
 
-GitHub Actions (`.github/workflows/ci.yml`) runs five jobs per push/PR:
+GitHub Actions (`.github/workflows/ci.yml`) runs six jobs per push/PR:
 
 - `lint` — `ruff check` + `ruff format --check`
 - `typecheck` — `pyright`
-- `test` — `pytest tests/unit/` with coverage upload to Codecov
+- `test` — `pytest tests/unit/ tests/features/` with coverage upload to Codecov, floored at 95%
+- `integration` — after `lint` and `typecheck`: a real Frappe v15 bench with `frappe_ai`
+  installed, `frappe-mcp-server` built from source and a containerised Ollama, exercising the
+  LLM, MCP and Frappe-history boundaries
 - `security` — Semgrep auto config
 - `build` — multi-arch Docker build, pushed to `ghcr.io/vyogotech/frappe-ai-agent` on non-PR refs
 
