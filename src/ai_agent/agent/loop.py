@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import AsyncGenerator, Iterator
+from contextlib import aclosing
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -108,6 +109,88 @@ class _StopReason(AsyncCallbackHandler):
                 self.cut_off = str(reason).lower() in _CUT_OFF_REASONS
 
 
+class _Reply:
+    """One model reply: what of the turn has gone out already, and the envelope it ends as."""
+
+    def __init__(self) -> None:
+        self.envelope: dict[str, Any] = {"blocks": []}
+        self.emitted_any = False
+        self.spoke = False  # text sent earlier in the turn; the next answer starts a paragraph
+        self._sent: dict[int, int] = {}
+        self._emitted: set[int] = set()
+
+    async def stream(
+        self, model: Any, messages: list[BaseMessage], callbacks: list[BaseCallbackHandler]
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Send one reply's text as it grows, stopping once a tool call appears in the envelope."""
+        self.envelope, self.emitted_any = {"blocks": []}, False
+        self._sent, self._emitted = {}, set()
+        live = True
+        async for partial in model.astream(messages, config={"callbacks": callbacks}):
+            if not isinstance(partial, dict):
+                continue
+            self.envelope = partial
+            live = live and not any(_is_tool_call(b) for b in partial.get("blocks") or [])
+            if live:
+                for ev in self.flush(final=False):
+                    yield ev
+
+    def flush(self, *, final: bool) -> Iterator[dict[str, Any]]:
+        """The events this reply has not sent yet; `final` releases the block it was holding."""
+        for ev in _stream_events(
+            self.envelope, self._sent, self._emitted, final=final, lead=self.spoke
+        ):
+            self.emitted_any = self.spoke = True
+            yield ev
+
+
+class _RepeatGuard:
+    """The same calls with the same arguments N steps running: the model has stopped progressing."""
+
+    def __init__(self) -> None:
+        self._last: list[tuple[str, str]] = []
+        self._count = 0
+
+    def stuck(self, tool_blocks: list[dict[str, Any]]) -> bool:
+        """True once this envelope's calls have repeated `_REPEAT_LIMIT` times; a change resets."""
+        calls = [(name, json.dumps(args, sort_keys=True)) for name, args in map(_call, tool_blocks)]
+        self._count = self._count + 1 if calls == self._last else 1
+        self._last = calls
+        return self._count >= _REPEAT_LIMIT
+
+
+async def _run_tools(
+    tool_blocks: list[dict[str, Any]],
+    envelope: dict[str, Any],
+    messages: list[BaseMessage],
+    tool_registry: ToolRegistry,
+    *,
+    session: str | None,
+    result_max_chars: int,
+) -> AsyncGenerator[dict[str, Any], None]:
+    """Announce and run the envelope's calls, then put the attempt and its results in `messages`."""
+    for name, args in map(_call, tool_blocks):
+        yield {"type": "tool_call", "name": name, "arguments": args}
+
+    result_lines: list[str] = []
+    for name, args in map(_call, tool_blocks):
+        # what the agent fills, the model never does — dropped even when this turn has no
+        # session to put back, or an unpinned search runs against the chat the model named
+        args = {k: v for k, v in args.items() if k not in AGENT_ARGS.get(name, ())}
+        if name == KB_TOOL and session:
+            args["session"] = session
+        result = await tool_registry.ainvoke(name, args)
+        # the sources come out of the whole result; only the prompt's copy is capped
+        if name == KB_TOOL and (items := _passages(result)):
+            yield {"type": "sources", "items": items}
+        result_lines.append(_result_line(name, args, cap_for_prompt(result, result_max_chars)))
+
+    # Replay the model's tool_call envelope as an AIMessage so the
+    # context shows what was attempted; then feed back the results.
+    messages.append(AIMessage(content=json.dumps(envelope, ensure_ascii=False)))
+    messages.append(HumanMessage(content=_as_data("\n".join(result_lines))))
+
+
 async def run_agent_loop(
     *,
     llm: BaseChatModel,
@@ -135,15 +218,12 @@ async def run_agent_loop(
         history=history,
     )
 
-    last_calls: list[tuple[str, str]] = []
-    repeats = 0
-    spoke = False  # text sent in an earlier iteration; the next answer starts a paragraph
+    reply = _Reply()
+    repeats = _RepeatGuard()
 
     if confirmed is not None:
         # The user clicked Allow, so this call runs once, before the model gets a turn.
-        name, args = str(confirmed.get("name") or ""), confirmed.get("arguments") or {}
-        if not isinstance(args, dict):
-            args = {}
+        name, args = _name_and_args(confirmed)
         yield {"type": "tool_call", "name": name, "arguments": args}
         result = cap_for_prompt(await tool_registry.ainvoke(name, args), tool_result_max_chars)
         messages.append(
@@ -159,42 +239,24 @@ async def run_agent_loop(
         # Each snapshot holds the whole envelope so far. Text goes out as it grows while no
         # tool_call has appeared; text written before a tool_call stays as a preamble. At
         # stream end we decide whether it was a tool-calling iteration or the final one.
-        last_partial: dict[str, Any] | None = None
-        sent: dict[int, int] = {}
-        emitted: set[int] = set()
-        live = True
-        emitted_any = False
         stop = _StopReason()
         try:
-            async for partial in structured_llm.astream(
-                messages, config={"callbacks": [*(callbacks or []), stop]}
-            ):
-                if not isinstance(partial, dict):
-                    continue
-                last_partial = partial
-                if live and any(_is_tool_call(b) for b in partial.get("blocks") or []):
-                    live = False
-                if live:
-                    for ev in _stream_events(partial, sent, emitted, final=False, lead=spoke):
-                        emitted_any = spoke = True
-                        yield ev
+            # aclosing, because `async for` does not close what it iterates: without it the
+            # provider's open response outlives the turn a client stopped.
+            async with aclosing(
+                reply.stream(structured_llm, messages, [*(callbacks or []), stop])
+            ) as replied:
+                async for ev in replied:
+                    yield ev
         except Exception as exc:
-            # Attribute names differ across LangChain chat-model classes, so read whichever exists.
-            llm_endpoint = (
-                getattr(llm, "openai_api_base", None)
-                or getattr(llm, "base_url", None)
-                or "<unknown>"
-            )
-            llm_model = (
-                getattr(llm, "model_name", None) or getattr(llm, "model", None) or "<unknown>"
-            )
+            llm_endpoint, llm_model = _llm_identity(llm)
             logger.warning(
                 "agent_loop_llm_error",
                 step=step,
                 error_type=type(exc).__name__,
                 error=str(exc)[:300],
-                llm_endpoint=str(llm_endpoint),
-                llm_model=str(llm_model),
+                llm_endpoint=llm_endpoint,
+                llm_model=llm_model,
             )
             raise
 
@@ -204,10 +266,7 @@ async def run_agent_loop(
             logger.warning("agent_loop_reply_cut_off", step=step)
             raise TurnFailure(REPLY_CUT_OFF)
 
-        final_envelope = last_partial or {"blocks": []}
-        blocks: list[dict[str, Any]] = list(final_envelope.get("blocks") or [])
-        tool_blocks = [b for b in blocks if _is_tool_call(b)]
-        non_tool_blocks = [b for b in blocks if not _is_tool_call(b)]
+        blocks, tool_blocks, non_tool_blocks = _split_blocks(reply.envelope)
 
         # Reachable despite the schema's minItems: 1, when a provider stream stalls.
         if not blocks:
@@ -234,10 +293,9 @@ async def run_agent_loop(
 
         if not tool_blocks:
             # Final iteration: send what the stream has not sent yet.
-            for ev in _stream_events(final_envelope, sent, emitted, final=True, lead=spoke):
-                emitted_any = spoke = True
+            for ev in reply.flush(final=True):
                 yield ev
-            if not emitted_any:
+            if not reply.emitted_any:
                 # All non-tool blocks were malformed and dropped by
                 # parse_blocks / envelope_to_markup. Surface a fallback.
                 logger.warning(
@@ -253,27 +311,23 @@ async def run_agent_loop(
 
         # Tool-calling iteration. The envelope is replayed to the model below as if the user saw all
         # of it, so first send the blocks beside the tool calls that streaming stopped short of.
-        for ev in _stream_events(final_envelope, sent, emitted, final=True, lead=spoke):
-            spoke = True
+        for ev in reply.flush(final=True):
             yield ev
 
         # A write needs a confirmation only the user can give, so the turn ends here and no tool
         # in this envelope runs — a read beside a write would otherwise run on the write's terms.
-        pending = next((tb for tb in tool_blocks if tool_registry.writes(_call(tb)[0])), None)
+        pending = _pending_write(tool_blocks, tool_registry)
         if pending is not None:
-            name, args = _call(pending)
+            name, args = pending
             sentence = confirm_summary(name, args)
             logger.info("agent_loop_write_needs_confirmation", tool=name, step=step)
-            yield {"type": "content", "text": f"\n\n{sentence}" if spoke else sentence}
+            yield {"type": "content", "text": f"\n\n{sentence}" if reply.spoke else sentence}
             yield {"type": "tool_confirm", "id": uuid4().hex, "name": name, "arguments": args}
             return
 
         # Repeat-detection, before anything is announced: the same calls with the same arguments
         # N steps in a row = giving up. A different call between them resets the count.
-        calls = [(name, json.dumps(args, sort_keys=True)) for name, args in map(_call, tool_blocks)]
-        repeats = repeats + 1 if calls == last_calls else 1
-        last_calls = calls
-        if repeats >= _REPEAT_LIMIT:
+        if repeats.stuck(tool_blocks):
             logger.warning("agent_loop_repeat_limit_reached", repeat_limit=_REPEAT_LIMIT)
             yield {
                 "type": "content",
@@ -287,29 +341,18 @@ async def run_agent_loop(
 
         # Emit synthetic tool_call SSE events so the FE can render "fetching..." UI, then execute
         # each tool and feed results back into the message list.
-        for name, args in map(_call, tool_blocks):
-            yield {"type": "tool_call", "name": name, "arguments": args}
-
-        # Execute tools and append results to the message stream.
-        result_lines: list[str] = []
-        for name, args in map(_call, tool_blocks):
-            # what the agent fills, the model never does — dropped even when this turn has no
-            # session to put back, or an unpinned search runs against the chat the model named
-            args = {k: v for k, v in args.items() if k not in AGENT_ARGS.get(name, ())}
-            if name == KB_TOOL and session:
-                args["session"] = session
-            result = await tool_registry.ainvoke(name, args)
-            # the sources come out of the whole result; only the prompt's copy is capped
-            if name == KB_TOOL and (items := _passages(result)):
-                yield {"type": "sources", "items": items}
-            result_lines.append(
-                _result_line(name, args, cap_for_prompt(result, tool_result_max_chars))
+        async with aclosing(
+            _run_tools(
+                tool_blocks,
+                reply.envelope,
+                messages,
+                tool_registry,
+                session=session,
+                result_max_chars=tool_result_max_chars,
             )
-
-        # Replay the model's tool_call envelope as an AIMessage so the
-        # context shows what was attempted; then feed back the results.
-        messages.append(AIMessage(content=json.dumps(final_envelope, ensure_ascii=False)))
-        messages.append(HumanMessage(content=_as_data("\n".join(result_lines))))
+        ) as running:
+            async for ev in running:
+                yield ev
 
     # Loop fell off the bottom — hit the step cap.
     logger.warning("agent_loop_max_steps_exhausted", max_steps=max_steps)
@@ -326,12 +369,41 @@ def _is_tool_call(block: Any) -> bool:
     return isinstance(block, dict) and block.get("type") == TOOL_CALL_TYPE
 
 
-def _call(block: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """A tool_call block's name and arguments, whatever the model put in the payload."""
-    payload = block.get("payload") or {}
+def _name_and_args(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """A call's name and arguments, whatever the model or the confirmation put in the payload."""
     name = str(payload.get("name") or "")
     args = payload.get("arguments") or {}
     return name, args if isinstance(args, dict) else {}
+
+
+def _call(block: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """A tool_call block's name and arguments."""
+    return _name_and_args(block.get("payload") or {})
+
+
+def _split_blocks(
+    envelope: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """An envelope's blocks, and the same blocks split into the tool calls and everything else."""
+    blocks: list[dict[str, Any]] = list(envelope.get("blocks") or [])
+    tool_blocks = [b for b in blocks if _is_tool_call(b)]
+    return blocks, tool_blocks, [b for b in blocks if not _is_tool_call(b)]
+
+
+def _pending_write(
+    tool_blocks: list[dict[str, Any]], tool_registry: ToolRegistry
+) -> tuple[str, dict[str, Any]] | None:
+    """The first write in this envelope: the turn stops there until the user allows it."""
+    return next((call for call in map(_call, tool_blocks) if tool_registry.writes(call[0])), None)
+
+
+def _llm_identity(llm: BaseChatModel) -> tuple[str, str]:
+    """Endpoint and model name; the attribute names differ across LangChain chat-model classes."""
+    endpoint = (
+        getattr(llm, "openai_api_base", None) or getattr(llm, "base_url", None) or "<unknown>"
+    )
+    model = getattr(llm, "model_name", None) or getattr(llm, "model", None) or "<unknown>"
+    return str(endpoint), str(model)
 
 
 def _result_line(name: str, args: dict[str, Any], result: str) -> str:
