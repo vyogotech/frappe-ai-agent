@@ -58,7 +58,8 @@ Per chat request, `ChatService.handle_message` does the following:
 - [UV](https://docs.astral.sh/uv/) for dependency management
 - Ollama running locally (`http://localhost:11434`) with a tool-capable model pulled, or API credentials for OpenAI / Anthropic / Google
 - `frappe-mcp-server` reachable on `http://localhost:8080/mcp`
-- A Frappe/ERPNext instance reachable on `http://localhost:8000` (for chat history persistence)
+- A Frappe/ERPNext instance reachable on `http://localhost:8000` (for chat history persistence).
+  Frappe **version-16** is what the stack runs and what CI tests; nothing else is tested.
 
 ```bash
 uv sync --all-extras
@@ -488,14 +489,19 @@ The Dockerfile is a two-stage UV build that installs the committed `uv.lock`, ru
 
 GitHub Actions (`.github/workflows/ci.yml`) runs six jobs per push/PR:
 
-- `lint` — `ruff check` + `ruff format --check`
-- `typecheck` — `pyright`
-- `test` — `pytest tests/unit/ tests/features/` with coverage upload to Codecov, floored at 95%
-- `integration` — after `lint` and `typecheck`: a real Frappe v15 bench with `frappe_ai`
-  installed, `frappe-mcp-server` built from source and a containerised Ollama, exercising the
-  LLM, MCP and Frappe-history boundaries
-- `security` — Semgrep auto config
-- `build` — multi-arch Docker build, pushed to `ghcr.io/vyogotech/frappe-ai-agent` on non-PR refs
+Every job runs the same command a developer runs, through the Makefile.
+
+- `lint` — `make lint` (`ruff check` and `ruff format --check`), `make boundaries`
+  (the `.importlinter` layer contracts) and `pre-commit run --all-files`
+- `typecheck` — `make typecheck` (`pyright` over `src` and `tests`)
+- `test` — `make test` (`pytest tests/unit/` with coverage uploaded to Codecov, no floor: see the
+  comment in the workflow)
+- `integration` — after `lint` and `typecheck`: a real Frappe version-16 bench with `frappe_ai`
+  installed, `frappe-mcp-server` built from the commit ragbot pins and a containerised Ollama,
+  exercising the LLM, MCP and Frappe-history boundaries
+- `security` — `make security` (Semgrep `p/python`, Bandit, pip-audit) and `make workflows` (zizmor)
+- `build` — the Docker build, pushed to `ghcr.io/vyogotech/frappe-ai-agent` on non-PR refs, and only
+  after all five jobs above have passed
 
 ## License
 
