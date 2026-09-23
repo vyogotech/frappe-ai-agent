@@ -96,7 +96,7 @@ Streaming chat endpoint. Returns `text/event-stream`.
 
 `data_quality` is `"high"` on success, `"low"` if the turn ended in error.
 
-An `error` message is one plain line per kind of failure — the turn ran past its deadline, the reply was cut off, `tools/list` did not answer in time, or anything else, which reads "The answer could not be completed. Try again." The exception type and its text never reach the client: they are in the turn's own log line (`chat_handle_message_failed`, `chat_tools_load_timed_out`) and on the `agent.chat_turn` span. The same line is what the turn saves as its answer, so a reopened chat shows no exception text either.
+An `error` message is one plain line per kind of failure — the turn ran past its deadline, the reply was cut off, `tools/list` did not answer in time, or anything else, which reads "The answer could not be completed. Try again." The exception type and its text never reach the client: they are in the turn's own log line (`chat_handle_message_failed`, `chat_tools_load_timed_out`) and on the `agent.chat_turn` span. The same line is what the turn saves as its answer — appended under an `[incomplete]` marker to the text that had already arrived, when there was any — so a reopened chat shows no exception text either.
 
 The wire contract is encoded as `TypedDict`s in [`src/ai_agent/transport/sse_events.py`](src/ai_agent/transport/sse_events.py) (`SessionEvent`, `StatusEvent`, `ToolCallEvent`, `ContentEvent`, `ContentBlockEvent`, `ErrorEvent`, `DoneEvent`, plus the `SSEEvent` union). A `validate_event(event: dict)` helper in the same module raises `ValueError` on any drift from the contract — `tests/unit/test_chat_service.py::test_every_emitted_event_matches_sse_contract` runs it over every event the service emits in a typical turn, so adding a new field server-side without updating the TypedDict is caught at CI time, not in a frontend bug report.
 
@@ -392,28 +392,32 @@ mentioning `GraphRecursionError`.
    `data_quality: "low"`, and logs `chat_turn_completed` with
    `failed=true`.
 
-### Known limitation — cancelled turns leave no `chat_turn_completed` log
+### A turn the caller hangs up on
 
-When a client disconnects mid-stream, Starlette calls `aclose()` on
-the async generator, raising `GeneratorExit` at the current `yield`.
-`GeneratorExit` is `BaseException`, not `Exception`, so the existing
-`except Exception` in `ChatService.handle_message` does not catch
-it; control unwinds through the `agent.chat_turn` span (which ends
-cleanly with no ERROR status — correct, cancellation isn't an
-error). The trailing `logger.info("chat_turn_completed", ...)` line
-sits after `yield "done"`, so on a cancelled turn it never fires.
+**Symptoms:** `chat_turn_cancelled` in the log and no
+`chat_turn_completed` line for that turn; in the chat, an answer that
+ends "[incomplete] The answer was stopped. Ask again for a full
+answer."
 
-**Detection today:** a `request_id` value that appears in the early
-request lifecycle (the `RequestIDMiddleware` bind, or the initial
-`session` SSE event) but does NOT appear in a subsequent
-`chat_turn_completed` line is a cancelled turn.
+The user pressed Stop, or the connection died — a relay read timeout,
+a killed worker, a closed laptop. Both reach the agent the same way:
+Starlette calls `aclose()` on the async generator, raising
+`GeneratorExit` at the current `yield`, or cancels the task, raising
+`CancelledError` at the current `await`. Both are `BaseException`, not
+`Exception`, so `except Exception` in `ChatService.handle_message`
+never sees them; they are caught by name instead. The turn then logs
+`chat_turn_cancelled` (duration, tools called, characters answered)
+and, when text had already reached the user, saves that text as the
+answer with the stopped line appended, so a reopened chat shows what
+the live one did rather than an unanswered question. A turn cut before
+it said anything saves no answer — there is none to save.
 
-A future change may emit a dedicated `chat_turn_cancelled` event in
-the `GeneratorExit` path. It is intentionally not implemented today
-to avoid the yield-in-cancellation-path `RuntimeError` that the
-explicit non-`finally` design in `src/ai_agent/services/chat.py`
-(see comments around the inner `try/except Exception:` block in
-`handle_message`) was added to avoid.
+That save is awaited inside `anyio.move_on_after(5, shield=True)`, so
+the cancellation being unwound cannot cut the write short. Nothing is
+yielded on that path: a `yield` after `GeneratorExit` is the
+`RuntimeError` the explicit non-`finally` design in
+`src/ai_agent/services/chat.py` avoids. The `agent.chat_turn` span
+ends cleanly with no ERROR status — cancellation isn't an error.
 
 ### The model ran out of tokens mid-answer
 
@@ -426,7 +430,9 @@ token cap (`done_reason: "length"` on Ollama, `finish_reason` or
 ran out. The loop runs no tool from that reply — a cut-off argument
 would name the wrong document — and ends the turn with "The answer
 was cut short. Try a narrower question." after whatever text had
-already been streamed.
+already been streamed. That text is kept: the answer is saved as the
+text that arrived with the same line appended under an `[incomplete]`
+marker, so a reopened chat shows the part that was written.
 
 If this is frequent, the answers are longer than the cap: raise
 `AI_AGENT_LLM_MAX_TOKENS` (Ollama `num_predict`, default 8192),

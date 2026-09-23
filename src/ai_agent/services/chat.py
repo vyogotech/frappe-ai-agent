@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+import anyio
 import httpx
 import structlog
 from langchain_core.callbacks import AsyncCallbackHandler
@@ -43,6 +44,10 @@ _TITLE_MAX_LEN = 60
 TURN_TOO_LONG = "This took too long. Try a shorter question."
 TOOLS_TIMED_OUT = "The assistant's tools timed out. Try again."
 ANSWER_FAILED = "The answer could not be completed. Try again."
+ANSWER_STOPPED = "The answer was stopped. Ask again for a full answer."
+
+# The turn is already over when a stopped answer is written, so that save gets its own budget.
+_STOPPED_SAVE_TIMEOUT_S = 5
 
 # MCP tools/list timeout moved to Settings.mcp_tools_load_timeout_s so ops
 # can tune it per-environment (slow LAN, busy MCP). The constant lookup
@@ -88,6 +93,13 @@ def _source_ref(item: dict[str, Any]) -> dict[str, Any]:
     return ref | {"distance": None}
 
 
+def _saved_answer(parts: list[str], note: str) -> str:
+    """The row a turn that did not finish leaves: the text that arrived and why it stops there."""
+    text = "".join(parts).rstrip()
+    # list_messages drops an assistant row that starts with `[error]`, so a kept answer must not
+    return f"{text}\n\n[incomplete] {note}" if text else f"[error] {note}"
+
+
 def _utcnow_rfc3339_z() -> str:
     """RFC3339 timestamp ending in `Z` (matches frappe-mcp-server format)."""
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -119,6 +131,13 @@ class _DecodeUsage(AsyncCallbackHandler):
         if not self.nanos:
             return None
         return {"output_tokens": self.tokens, "output_seconds": round(self.nanos / 1e9, 3)}
+
+
+def _usage(decode: _DecodeUsage, first_token: float | None) -> dict[str, float]:
+    """The model's decode counts plus the seconds to the first answer text, where each is known."""
+    return (decode.summary() or {}) | (
+        {"first_token_s": first_token} if first_token is not None else {}
+    )
 
 
 @contextmanager
@@ -189,6 +208,44 @@ class ChatService:
         # monotonic and the right primitive for a duration measurement
         # (immune to system clock jumps).
         t0 = time.perf_counter()
+
+        async def save_answer(content: str, session: str) -> None:
+            """Write the assistant row; best-effort, so a history outage never ends the turn."""
+            tool_args_json: str | None = None
+            if tool_invocations:
+                try:
+                    tool_args_json = json.dumps(tool_invocations)
+                except (TypeError, ValueError):
+                    # Arguments weren't JSON-serialisable — drop them silently.
+                    tool_args_json = None
+            usage = _usage(decode, first_token)
+            saved_sources = list(
+                {(s.get("file"), s.get("seq")): _source_ref(s) for s in sources_seen}.values()
+            )
+            tool_result_json = (
+                json.dumps(
+                    {"sources": saved_sources, "blocks": blocks_seen}
+                    | ({"usage": usage} if usage else {})
+                )
+                if sources_seen or blocks_seen or usage
+                else None
+            )
+            try:
+                await self._history.save_message(
+                    sid=user_context.sid,
+                    session=session,
+                    role="assistant",
+                    content=content,
+                    tool_args_json=tool_args_json,
+                    tool_result_json=tool_result_json,
+                )
+            except Exception as exc:  # noqa: BLE001 - a history write never aborts the answer
+                logger.warning(
+                    "chat_history_assistant_message_write_failed",
+                    session_id=session,
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:200],
+                )
 
         turn: dict[str, Any] = {"session_id": session_id, "t0": t0}
         with (
@@ -389,6 +446,16 @@ class ChatService:
                                 first_token = round(time.monotonic() - started, 3)
                         yield ev
 
+            except (asyncio.CancelledError, GeneratorExit):
+                # Stop, a dropped socket or a killed worker: the user read the text that arrived,
+                # so keep it before the cancellation finishes unwinding this turn.
+                if assistant_text_parts:
+                    with anyio.move_on_after(_STOPPED_SAVE_TIMEOUT_S, shield=True):
+                        await save_answer(
+                            _saved_answer(assistant_text_parts, ANSWER_STOPPED), session_id
+                        )
+                raise
+
             except Exception as exc:
                 failed = True
                 error_type = type(exc).__name__
@@ -419,50 +486,14 @@ class ChatService:
                 )
                 yield {"type": "error", "message": error_message}
 
-            # Persist the final assistant message (success or error).
-            # Best-effort: if this fails it is logged inside the client and
-            # we still emit `done`.
             assistant_content = (
-                f"[error] {error_message}" if failed else "".join(assistant_text_parts)
+                _saved_answer(assistant_text_parts, error_message)
+                if failed
+                else "".join(assistant_text_parts)
             )
-            tool_args_json: str | None = None
-            if tool_invocations:
-                try:
-                    tool_args_json = json.dumps(tool_invocations)
-                except (TypeError, ValueError):
-                    # Arguments weren't JSON-serialisable — drop them silently.
-                    tool_args_json = None
-            usage = (decode.summary() or {}) | (
-                {"first_token_s": first_token} if first_token is not None else {}
-            )
-            saved_sources = list(
-                {(s.get("file"), s.get("seq")): _source_ref(s) for s in sources_seen}.values()
-            )
-            tool_result_json = (
-                json.dumps(
-                    {"sources": saved_sources, "blocks": blocks_seen}
-                    | ({"usage": usage} if usage else {})
-                )
-                if sources_seen or blocks_seen or usage
-                else None
-            )
-            try:
-                await self._history.save_message(
-                    sid=user_context.sid,
-                    session=session_id,
-                    role="assistant",
-                    content=assistant_content,
-                    tool_args_json=tool_args_json,
-                    tool_result_json=tool_result_json,
-                )
-            except Exception as exc:  # noqa: BLE001 - a history write never aborts the answer
-                logger.warning(
-                    "chat_history_assistant_message_write_failed",
-                    session_id=session_id,
-                    error_type=type(exc).__name__,
-                    error=str(exc)[:200],
-                )
+            await save_answer(assistant_content, session_id)
 
+            usage = _usage(decode, first_token)
             yield {
                 "type": "done",
                 "tools_called": tools_called,
