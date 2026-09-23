@@ -290,14 +290,14 @@ uv run pytest --cov=ai_agent           # coverage
   - `agent.history.write` (each Frappe REST write — `kind`, `status_code`, `failed`)
 
   On the failure path the `agent.chat_turn` span carries an ERROR status and the original exception via `record_exception`, so a trace UI bubbles it up.
-- **OpenTelemetry metrics** — the OTEL Metrics API is wired with one counter: `agent.history.write_failures` (attribute `kind=session|message`). Lets a Prometheus/OTLP collector alert on sustained Frappe-write outages (e.g. `rate(agent_history_write_failures_total[5m]) > 0`) that the per-call WARN logs alone could not surface.
+- **OpenTelemetry metrics** — one counter is recorded against the OTEL Metrics API, `agent.history.write_failures` (attribute `kind=session|message`). This release installs no `MeterProvider`, so the counter runs against the API's no-op default and nothing is exported: `frappe_history_write_failed` in the log is the signal for a Frappe-write outage. A process that installs its own `MeterProvider` before the first write picks the counter up.
 
 ## Runbook
 
 Practical "got paged at 3am" diagnosis paths. Each scenario lists the
 visible symptom, the signals to consult, and the remediation. Assumes
-the deployment has `AI_AGENT_LOG_FORMAT=json` (default) and the OTEL
-spans / counters from the Operability branch are wired.
+the deployment has `AI_AGENT_LOG_FORMAT=json` (default) and, where a
+trace UI is mentioned, `AI_AGENT_OTEL_ENDPOINT` set.
 
 ### Chat requests return 500 / clients see `error` events
 
@@ -341,10 +341,10 @@ Message rows stop appearing in Frappe.
 1. Grep `frappe_history_write_failed` in agent logs — `kind`
    (session/message), `error_type`, and `status_code` (when HTTP)
    identify what's failing.
-2. If you scrape OTEL metrics, `agent.history.write_failures`
-   counter (labels: `kind`) is non-zero. An alert
-   `rate(agent_history_write_failures_total[5m]) > 0` is the right
-   shape for this.
+2. The `agent.history.write_failures` counter (attribute `kind`)
+   records the same failures, but this release installs no
+   `MeterProvider`, so nothing is exported and there is nothing to
+   alert on yet — count the log events instead.
 3. Common causes: Frappe down (transport errors), session cookie
    expired (401), CSRF token wedged (400 with `CSRFTokenError` —
    the client auto-refreshes once, but a sustained block means the

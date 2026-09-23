@@ -59,17 +59,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         logger.info("starting", port=settings.port, model=settings.llm_model)
-
-        # OTEL is the one piece that legitimately needs startup timing —
-        # the exporter background thread is what we don't want spinning up
-        # in tests that construct the app for introspection only.
-        if settings.otel_endpoint:
-            create_tracer_provider(
-                endpoint=settings.otel_endpoint,
-                service_name=settings.otel_service_name,
-            )
-            FastAPIInstrumentor.instrument_app(app)
-
         logger.info("started")
         try:
             yield
@@ -86,6 +75,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
         openapi_url=None,
     )
+
+    # Not in the lifespan: instrument_app only patches build_middleware_stack, and Starlette
+    # has already called and cached it (starlette/applications.py:88) by then — the lifespan
+    # scope is itself the first ASGI call, so no HTTP span would ever be created.
+    if settings.otel_endpoint:
+        create_tracer_provider(
+            endpoint=settings.otel_endpoint,
+            service_name=settings.otel_service_name,
+        )
+        FastAPIInstrumentor.instrument_app(app)
 
     # No SlowAPIMiddleware: it runs before Depends(), so requests without a valid sid would
     # spend tokens before their 401; @limiter.limit checks after Depends().
