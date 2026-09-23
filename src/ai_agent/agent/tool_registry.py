@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Any
 
 import structlog
 from langchain_core.tools import BaseTool
+from opentelemetry import trace
+from opentelemetry.trace import Span, Status, StatusCode
 
 logger = structlog.get_logger(__name__)
+_tracer = trace.get_tracer(__name__)
 
 
 def _is_permission_error(exc: Exception) -> bool:
@@ -46,6 +50,8 @@ class ToolRegistry:
         # surface two tools with the same name across namespaces.
         self._by_name: dict[str, BaseTool] = {t.name: t for t in tools}
         self._timeout_s = timeout_s
+        # One row per call, in order: the turn's audit trail of what ran and how it ended.
+        self.invocations: list[dict[str, Any]] = []
         for t in tools:
             # langchain-mcp-adapters 0.3 returns an MCP isError result as ordinary output
             t.handle_tool_error = False
@@ -84,39 +90,81 @@ class ToolRegistry:
 
     async def ainvoke(self, name: str, args: dict[str, Any] | None) -> str:
         """Run the named tool; never raises: an unknown name or an error comes back as a string."""
-        if name not in self._by_name:
-            return f"error: unknown tool {name!r}; available: {sorted(self._by_name)}"
-        tool = self._by_name[name]
-        try:
-            raw = await asyncio.wait_for(tool.ainvoke(args or {}), self._timeout_s)
-        except TimeoutError:
-            logger.warning("tool_call_timed_out", tool=name, timeout_s=self._timeout_s)
-            return f"Tool call failed: {name} timed out after {self._timeout_s:.0f}s"
-        except Exception as exc:  # noqa: BLE001 - every tool failure is a result the model reads
-            logger.warning(
-                "tool_call_failed", tool=name, error_type=type(exc).__name__, error=str(exc)[:200]
-            )
-            return _exception_to_result(exc)
-        # MCP tools return strings, pydantic models, or (langchain-mcp-adapters) a list of
-        # content blocks; coerce uniformly. Text blocks become their text: str() of the list
-        # handed the model a Python repr with block ids in it.
-        if isinstance(raw, str):
-            return raw
-        if (
-            isinstance(raw, list)
-            and raw
-            and all(isinstance(b, dict) and b.get("type") == "text" for b in raw)
-        ):
-            return "\n".join(str(b.get("text", "")) for b in raw)
-        model_dump = getattr(raw, "model_dump", None)
-        if callable(model_dump):
-            return json.dumps(model_dump(), ensure_ascii=False)
-        return str(raw)
+        started = time.perf_counter()
+        # Name and attributes as the OpenTelemetry GenAI conventions spell them.
+        with _tracer.start_as_current_span(f"execute_tool {name}") as span:
+            span.set_attribute("gen_ai.operation.name", "execute_tool")
+            span.set_attribute("gen_ai.tool.name", name)
+            error_type: str | None = None
+            if name not in self._by_name:
+                error_type = "UnknownTool"
+                result = f"error: unknown tool {name!r}; available: {sorted(self._by_name)}"
+            else:
+                try:
+                    raw = await asyncio.wait_for(
+                        self._by_name[name].ainvoke(args or {}), self._timeout_s
+                    )
+                except TimeoutError:
+                    logger.warning("tool_call_timed_out", tool=name, timeout_s=self._timeout_s)
+                    error_type = "TimeoutError"
+                    result = f"Tool call failed: {name} timed out after {self._timeout_s:.0f}s"
+                except Exception as exc:  # noqa: BLE001 - a tool failure is a result the model reads
+                    logger.warning(
+                        "tool_call_failed",
+                        tool=name,
+                        error_type=type(exc).__name__,
+                        error=str(exc)[:200],
+                    )
+                    error_type = type(exc).__name__
+                    result = _exception_to_result(exc)
+                else:
+                    result = _as_text(raw)
+            self._record(span, name, args, started, error_type)
+            return result
+
+    def _record(
+        self,
+        span: Span,
+        name: str,
+        args: dict[str, Any] | None,
+        started: float,
+        error_type: str | None,
+    ) -> None:
+        """Put the call's outcome on its span and in the turn's audit trail."""
+        hidden = AGENT_ARGS.get(name, set())
+        call: dict[str, Any] = {
+            "name": name,
+            "args": {k: v for k, v in (args or {}).items() if k not in hidden},
+            "ok": error_type is None,
+            "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+        }
+        if error_type is not None:
+            call["error_type"] = error_type
+            span.set_attribute("error.type", error_type)
+            span.set_status(Status(StatusCode.ERROR, error_type))
+        self.invocations.append(call)
 
 
 # Arguments the agent fills itself, never the model: a knowledge search is scoped to the chat
 # the question came from, and offering `session` would let the model aim it at another chat.
 AGENT_ARGS = {"search_knowledge_base": {"session"}}
+
+
+def _as_text(raw: Any) -> str:
+    """One tool result as text: MCP tools answer with a string, content blocks or a model."""
+    if isinstance(raw, str):
+        return raw
+    # str() of a block list handed the model a Python repr with block ids in it
+    if (
+        isinstance(raw, list)
+        and raw
+        and all(isinstance(b, dict) and b.get("type") == "text" for b in raw)
+    ):
+        return "\n".join(str(b.get("text", "")) for b in raw)
+    model_dump = getattr(raw, "model_dump", None)
+    if callable(model_dump):
+        return json.dumps(model_dump(), ensure_ascii=False)
+    return str(raw)
 
 
 def _render_args_schema(tool: BaseTool) -> str:

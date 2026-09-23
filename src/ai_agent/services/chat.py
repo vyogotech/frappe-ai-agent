@@ -104,6 +104,11 @@ def _saved_answer(parts: list[str], note: str) -> str:
     return f"{text}\n\n[incomplete] {note}" if text else f"[error] {note}"
 
 
+def _failed_calls(invocations: list[dict[str, Any]]) -> int:
+    """How many of a turn's tool calls ended in an error."""
+    return sum(1 for call in invocations if not call["ok"])
+
+
 def _utcnow_rfc3339_z() -> str:
     """RFC3339 timestamp ending in `Z` (matches frappe-mcp-server format)."""
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -194,6 +199,8 @@ class ChatService:
         """Yield one turn's SSE events; an AsyncGenerator, so aclose() can stop it on disconnect."""
         user_message = CONFIRMED_TURN if confirmation else (message or "")
         tools_called: list[str] = []
+        # Rebound below to the registry's own rows, which carry each call's outcome; empty
+        # until then, so a turn that never gets a registry still saves and still ends.
         tool_invocations: list[dict[str, Any]] = []
         # Final user-visible content (text blocks from the agent loop's
         # last iteration), accumulated for history persistence.
@@ -402,6 +409,7 @@ class ChatService:
                         "Do not fabricate data."
                     )
                 tool_registry = ToolRegistry(tools, self._settings.mcp_tool_timeout_s)
+                tool_invocations = tool_registry.invocations
 
                 # A step is one LLM call plus its tool calls: two units of the recursion limit.
                 max_steps = max(1, self._settings.agent_recursion_limit // 2)
@@ -441,7 +449,6 @@ class ChatService:
                             continue
                         if ev["type"] == "tool_call":
                             tools_called.append(ev["name"])
-                            tool_invocations.append({"name": ev["name"], "args": ev["arguments"]})
                         elif ev["type"] == "content_block":
                             block_events_emitted += 1
                             blocks_seen.append(ev["block"])
@@ -514,16 +521,20 @@ class ChatService:
             await save_answer(assistant_content, session_id)
 
             usage = _usage(decode, first_token)
+            # A tool failure never raises — it comes back as a result the model reads — so a
+            # turn built on one is still answered, and it is the answer that is worth less.
+            tools_failed = _failed_calls(tool_invocations)
             yield {
                 "type": "done",
                 "tools_called": tools_called,
-                "data_quality": "low" if failed else "high",
+                "data_quality": "low" if failed or tools_failed else "high",
                 "timestamp": _utcnow_rfc3339_z(),
                 **({"usage": usage} if usage else {}),
             }
 
             content_chars = sum(len(p) for p in assistant_text_parts)
             turn_span.set_attribute("tools_called_count", len(tools_called))
+            turn_span.set_attribute("tools_failed_count", tools_failed)
             turn_span.set_attribute("content_chars", content_chars)
             turn_span.set_attribute("block_events_emitted", block_events_emitted)
             turn_span.set_attribute("failed", failed)
@@ -537,6 +548,7 @@ class ChatService:
                 "duration_ms": duration_ms,
                 "tools_called": tools_called,
                 "tools_called_count": len(tools_called),
+                "tools_failed_count": tools_failed,
                 "content_chars": content_chars,
                 "block_events_emitted": block_events_emitted,
                 "failed": failed,

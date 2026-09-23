@@ -94,7 +94,7 @@ Streaming chat endpoint. Returns `text/event-stream`.
 | `error`         | `{ message: str }` — fatal error; followed by `done`                    |
 | `done`          | `{ tools_called: list[str], data_quality, timestamp: str }`             |
 
-`data_quality` is `"high"` on success, `"low"` if the turn ended in error.
+`data_quality` is `"high"` on success, `"low"` if the turn ended in error or if any tool call in it failed — a failed call is a result the model answers around, so the turn still finishes, and the answer it produced rests on less.
 
 An `error` message is one plain line per kind of failure — the turn ran past its deadline, the reply was cut off, `tools/list` did not answer in time, or anything else, which reads "The answer could not be completed. Try again." The exception type and its text never reach the client: they are in the turn's own log line (`chat_handle_message_failed`, `chat_tools_load_timed_out`) and on the `agent.chat_turn` span. The same line is what the turn saves as its answer — appended under an `[incomplete]` marker to the text that had already arrived, when there was any — so a reopened chat shows no exception text either.
 
@@ -282,11 +282,12 @@ uv run pytest --cov=ai_agent           # coverage
 
 - **Structured logging** via `structlog`. Default JSON output to stdout; switch to a human-readable renderer with `AI_AGENT_LOG_FORMAT=console`. Libraries that log through the standard library — uvicorn, slowapi, `mcp` — are routed through the same renderer and carry the same `level`, `logger`, `timestamp` and `request_id` fields. `uvicorn.access`, `httpx`, `httpcore` and `mcp` are pinned to WARNING to keep the stream readable.
 - **Request correlation** — every response carries an `X-Request-ID` header (incoming value echoed if the client sets one, otherwise a fresh UUID). The same id is bound into `structlog.contextvars` for the duration of the request, so any log emitted inside a handler carries `request_id=…` automatically.
-- **Per-turn audit log** — `ChatService.handle_message` emits one info-level `chat_turn_completed` event at the end of every turn with `duration_ms`, `tools_called`, `tools_called_count`, `content_chars`, `block_events_emitted`, `failed`, `session_id`, and `error_type` on failure. One log line per turn answers "what happened on this chat call" without grepping multiple streams.
+- **Per-turn audit log** — `ChatService.handle_message` emits one info-level `chat_turn_completed` event at the end of every turn with `duration_ms`, `tools_called`, `tools_called_count`, `tools_failed_count`, `content_chars`, `block_events_emitted`, `failed`, `session_id`, and `error_type` on failure. One log line per turn answers "what happened on this chat call" without grepping multiple streams.
 - **OpenTelemetry tracing** — set `AI_AGENT_OTEL_ENDPOINT` to an OTLP gRPC collector to enable export. Tracing is off when the env var is empty. Spans emitted per chat turn (nested under the FastAPI auto-instrumented HTTP span):
-  - `agent.chat_turn` (the whole handler — `session_id`, `tools_called_count`, `content_chars`, `block_events_emitted`, `failed`, `error_type`)
+  - `agent.chat_turn` (the whole handler — `session_id`, `tools_called_count`, `tools_failed_count`, `content_chars`, `block_events_emitted`, `failed`, `error_type`)
   - `agent.load_tools` (MCP `tools/list` call — `tool_count`)
   - `agent.run` (the envelope tool-use loop — `tool_count`, `max_steps`)
+  - `execute_tool <name>` (one per tool call, named and attributed as the OpenTelemetry GenAI conventions ask — `gen_ai.operation.name`, `gen_ai.tool.name`, and `error.type` with an ERROR status when the call fails)
   - `agent.history.write` (each Frappe REST write — `kind`, `status_code`, `failed`)
 
   On the failure path the `agent.chat_turn` span carries an ERROR status and the original exception via `record_exception`, so a trace UI bubbles it up.
@@ -319,8 +320,11 @@ trace UI is mentioned, `AI_AGENT_OTEL_ENDPOINT` set.
    - LLM unreachable → `agent.run` span error; httpx connect /
      timeout under it
    - Frappe Login expired → tool observations return
-     `Access denied: permission error — …` (those are not errors,
-     they're tool results; the LLM should explain them in the reply)
+     `Access denied: permission error — …`. The LLM explains them in
+     the reply, and each one is still a `tool_call_failed` log line, an
+     `execute_tool` span with ERROR status, and an `ok: false` row in
+     the assistant message's tool trail, so the turn ends with
+     `data_quality: "low"`.
 
 ### MCP `/health?detail=true` reports MCP not OK
 
