@@ -13,7 +13,8 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # not on main: cancelling there would kill the build job in the middle of its push
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   lint:
@@ -72,7 +73,7 @@ jobs:
       MCP_REPO: vyogotech/frappe-mcp-server
       MCP_REF: 5c8fa163acf157ffb738b7d4a6923f3c3ddf6c1f
       FRAPPE_AI_REPO: vyogotech/frappe_ai
-      # a branch, not a commit: ragbot's apps.json installs frappe_ai by branch too
+      # a branch because apps.json is too; ragbot ships audit/production-readiness until it merges
       FRAPPE_AI_REF: main
     services:
       mariadb:
