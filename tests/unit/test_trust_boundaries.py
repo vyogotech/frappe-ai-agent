@@ -17,9 +17,10 @@ from ai_agent.integrations.frappe_history import FrappeHistoryClient
 
 FRAPPE = "http://frappe.test"
 WHO = f"{FRAPPE}/api/method/frappe.auth.get_logged_user"
-# Frappe serves its login page with a csrf_token of its own, for the Guest session: a real
-# hex token, so a scraper that does not notice the redirect happily takes it.
-GUEST_TOKEN = "0123456789abcdef0123456789abcdef"
+# Frappe serves its login page with a csrf_token of its own, for the Guest session. Short and
+# word-shaped on purpose: the value only has to match _CSRF_PATTERN's hex, and a 32-character
+# hex run here reads as a real credential to every secret scanner.
+GUEST_TOKEN = "c0ffeedecaf"
 GUEST_LOGIN_PAGE = f'<html><script>window.csrf_token = "{GUEST_TOKEN}";</script></html>'
 
 
