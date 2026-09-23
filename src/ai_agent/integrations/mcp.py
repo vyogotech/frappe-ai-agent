@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -39,6 +40,9 @@ def build_mcp_client_for_sid(settings: Settings, sid: str) -> MultiServerMCPClie
                 "url": settings.mcp_server_url,
                 "transport": "streamable_http",
                 "headers": {"Cookie": f"sid={sid}"},
+                "timeout": timedelta(seconds=settings.mcp_tool_timeout_s),
+                # what a stalled tool call waits on; the adapter's own default is 5 minutes
+                "sse_read_timeout": timedelta(seconds=settings.mcp_tool_timeout_s),
             }
         }
     )

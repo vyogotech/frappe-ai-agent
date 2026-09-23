@@ -144,10 +144,14 @@ All settings are loaded from environment or `.env` with the `AI_AGENT_` prefix. 
 | `AI_AGENT_LLM_TEMPERATURE` | `0.2` | Low default tightens tool-call argument formatting on small local models |
 | `AI_AGENT_LLM_MAX_TOKENS` | `8192` | Max output tokens (Ollama `num_predict`) |
 | `AI_AGENT_LLM_NUM_CTX` | `16384` | Ollama context window. Ignored for hosted providers. The Ollama default of 2048 is too small for system prompt + tool results + answer |
+| `AI_AGENT_LLM_REQUEST_TIMEOUT_S` | `60.0` | Bound on one model call, as the httpx timeout under the provider client. Ollama's own client default is no timeout at all |
+| `AI_AGENT_AGENT_TURN_TIMEOUT_S` | `90.0` | Wall-clock bound on one chat turn. On expiry the turn ends with an `error` event and `done` with `data_quality: "low"` |
+| `AI_AGENT_AGENT_PROMPT_TEXT_MAX_CHARS` | `8000` | Longest single tool result or history row that may enter the prompt; the rest is cut with a `[truncated to N characters]` marker |
 | `AI_AGENT_AGENT_RECURSION_LIMIT` | `50` | Envelope-loop recursion ceiling — small models need headroom while exploring doctype schemas before converging |
 | `AI_AGENT_AGENT_RATE_LIMIT` | `30/minute` | slowapi-format per-sid rate limit on `POST /api/v1/chat` (e.g. `100/hour`, `10/second`) |
 | `AI_AGENT_MCP_SERVER_URL` | `http://localhost:8080/mcp` | MCP Streamable HTTP endpoint |
 | `AI_AGENT_MCP_TOOLS_LOAD_TIMEOUT_S` | `20.0` | Per-request bound on `tools/list`. A timeout becomes a single SSE `error` event, not a hung stream |
+| `AI_AGENT_MCP_TOOL_TIMEOUT_S` | `30.0` | Bound on one tool call, and on the HTTP and SSE read timeouts of the MCP session under it. A timeout comes back as a tool result the model can answer around |
 | `AI_AGENT_HEALTH_PROBE_TIMEOUT_S` | `5.0` | Timeout on the agent's own `/health` reachability pings against MCP and Ollama |
 | `AI_AGENT_FRAPPE_URL` | `http://localhost:8000` | Frappe URL for chat history writes |
 | `AI_AGENT_OTEL_ENDPOINT` | _empty_ | OTLP gRPC endpoint. Empty = tracing disabled |
@@ -156,6 +160,24 @@ All settings are loaded from environment or `.env` with the `AI_AGENT_` prefix. 
 | `AI_AGENT_LOG_FORMAT` | `json` | `json` or `console` |
 
 See [`.env.example`](.env.example) for a working starter file.
+
+### Bounds on a turn
+
+Every wait a turn can make sits inside the one above it, so the innermost failure is
+the one the user hears about:
+
+| Bound | Setting | Default | Why it sits there |
+|-------|---------|---------|-------------------|
+| Turn deadline | `AI_AGENT_AGENT_TURN_TIMEOUT_S` | 90 s | Outermost inside the agent, and inside its caller's: `frappe_ai` reads the stream with its own timeout (120 s by default) and kills the relay job at that plus 30 s. At 90 s the agent's own `error` and `done` still reach the browser instead of the relay's generic failure. |
+| Model call | `AI_AGENT_LLM_REQUEST_TIMEOUT_S` | 60 s | Inside the turn, so one stuck call fails while the turn still has time to report it. It is an httpx timeout, so on a streaming call it bounds the wait for the next chunk, not the whole answer — a model that keeps emitting is ended by the turn deadline. |
+| Tool call | `AI_AGENT_MCP_TOOL_TIMEOUT_S` | 30 s | Inside the turn, and short enough that a few calls still fit in one. A timeout comes back as a tool result, not a failed turn, so the model can answer around it. |
+| MCP session | `AI_AGENT_MCP_TOOL_TIMEOUT_S` | 30 s | The transport under the tool call: the adapter's own defaults are 30 s HTTP and 300 s for the SSE read, and that read would otherwise outlive both the call and the turn. `tools/list` keeps its own bound (`AI_AGENT_MCP_TOOLS_LOAD_TIMEOUT_S`, 20 s) and runs before the loop, inside the same turn deadline. |
+| HTTP | — | 10 s Frappe history, 5 s session check, `AI_AGENT_HEALTH_PROBE_TIMEOUT_S` for `/health` | Innermost: one request each, and each failure is reported by the step that made it. |
+
+Prompt size is bounded the same way: every tool result and every history row is cut to
+`AI_AGENT_AGENT_PROMPT_TEXT_MAX_CHARS` characters with a marker before it enters the
+prompt, so a single large document cannot fill `num_ctx` and leave the model silently
+truncating its own context.
 
 ## LLM providers
 
@@ -355,11 +377,15 @@ mentioning `GraphRecursionError`.
    generator never reached `done`. Check `X-Request-ID` and trace
    the matching `agent.chat_turn` span — if it's still open, the
    request is genuinely live.
-2. The 20s MCP `tools/list` timeout is the only hard internal
-   bound — beyond that, the LLM is presumed to be streaming.
-3. If the LLM provider hangs, the request will hang too. Configure
-   an httpx timeout on the LLM client via the provider's options
-   if your provider supports it.
+2. A turn is bounded by `AI_AGENT_AGENT_TURN_TIMEOUT_S` (default
+   90 s), a model call by `AI_AGENT_LLM_REQUEST_TIMEOUT_S` and a
+   tool call by `AI_AGENT_MCP_TOOL_TIMEOUT_S` — see "Bounds on a
+   turn". A stream open past the turn deadline is the client or the
+   relay holding it, not the agent.
+3. On the deadline the turn sends one `error` event ("This took too
+   long. Try a shorter question.") followed by `done` with
+   `data_quality: "low"`, and logs `chat_turn_completed` with
+   `failed=true`.
 
 ### Known limitation — cancelled turns leave no `chat_turn_completed` log
 

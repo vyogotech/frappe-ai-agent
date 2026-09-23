@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from langchain_core.messages import BaseMessage
 
 from ai_agent.agent.leak_filter import StreamingLeakFilter
-from ai_agent.agent.loop import run_agent_loop
+from ai_agent.agent.loop import cap_for_prompt, run_agent_loop
 from ai_agent.agent.prompts import build_system_prompt
 from ai_agent.agent.tool_registry import ToolRegistry
 from ai_agent.config import Settings
@@ -40,9 +40,28 @@ SystemPromptBuilder = Callable[[dict[str, Any]], str]
 
 _TITLE_MAX_LEN = 60
 
+TURN_TOO_LONG = "This took too long. Try a shorter question."
+
 # MCP tools/list timeout moved to Settings.mcp_tools_load_timeout_s so ops
 # can tune it per-environment (slow LAN, busy MCP). The constant lookup
 # stays local to keep the call site readable.
+
+
+async def _until(
+    deadline: float, events: AsyncGenerator[dict[str, Any], None]
+) -> AsyncGenerator[dict[str, Any], None]:
+    """Yield the turn's events, failing it once `deadline` (a loop clock reading) has passed."""
+    while True:
+        try:
+            # armed around the loop's own await, never around the yield below: a timeout there
+            # would cancel whoever is reading the stream instead of the turn
+            async with asyncio.timeout_at(deadline):
+                event = await anext(events)
+        except StopAsyncIteration:
+            return
+        except TimeoutError as exc:
+            raise TimeoutError(TURN_TOO_LONG) from exc
+        yield event
 
 
 def _tools_unavailable_message(root: BaseException) -> str:
@@ -147,6 +166,8 @@ class ChatService:
         blocks_seen: list[dict[str, Any]] = []
         decode = _DecodeUsage()
         started = time.monotonic()
+        # The whole turn's budget, so the history read and the tool load spend it too.
+        deadline = asyncio.get_running_loop().time() + self._settings.agent_turn_timeout_s
         first_token: float | None = None  # seconds until the first answer text went out
         block_events_emitted = 0
         failed = False
@@ -209,10 +230,13 @@ class ChatService:
                     )
                     rows = []
                 for row in rows:
+                    content = cap_for_prompt(
+                        row["content"], self._settings.agent_prompt_text_max_chars
+                    )
                     if row["role"] == "user":
-                        history_messages.append(HumanMessage(content=row["content"]))
+                        history_messages.append(HumanMessage(content=content))
                     else:
-                        history_messages.append(AIMessage(content=row["content"]))
+                        history_messages.append(AIMessage(content=content))
 
             # Persist the user's message. Best-effort: a Frappe outage must
             # not abort the chat turn — log and continue.
@@ -292,7 +316,7 @@ class ChatService:
                         "explaining tools are temporarily unavailable. "
                         "Do not fabricate data."
                     )
-                tool_registry = ToolRegistry(tools)
+                tool_registry = ToolRegistry(tools, self._settings.mcp_tool_timeout_s)
 
                 # A step is one LLM call plus its tool calls: two units of the recursion limit.
                 max_steps = max(1, self._settings.agent_recursion_limit // 2)
@@ -303,15 +327,19 @@ class ChatService:
                     # The prompt forbids disclosure; small models get talked past it.
                     leak_filter = StreamingLeakFilter()
                     leak_triggered = False
-                    async for ev in run_agent_loop(
-                        llm=self._llm,
-                        tool_registry=tool_registry,
-                        user_message=message,
-                        context_preamble=context_preamble,
-                        history=history_messages or None,
-                        max_steps=max_steps,
-                        callbacks=[decode],
-                        session=session_id,
+                    async for ev in _until(
+                        deadline,
+                        run_agent_loop(
+                            llm=self._llm,
+                            tool_registry=tool_registry,
+                            user_message=message,
+                            context_preamble=context_preamble,
+                            history=history_messages or None,
+                            max_steps=max_steps,
+                            tool_result_max_chars=self._settings.agent_prompt_text_max_chars,
+                            callbacks=[decode],
+                            session=session_id,
+                        ),
                     ):
                         if leak_triggered:
                             # Drain remaining events without emitting them so

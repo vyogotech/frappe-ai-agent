@@ -23,6 +23,8 @@ def create_llm(settings: Settings) -> BaseChatModel:
             num_ctx=settings.llm_num_ctx,
             repeat_penalty=1.0,
             top_k=1,
+            # the only way into the httpx client under ollama's, which defaults to timeout=None
+            client_kwargs={"timeout": settings.llm_request_timeout_s},
         )
 
     return init_chat_model(
@@ -32,4 +34,5 @@ def create_llm(settings: Settings) -> BaseChatModel:
         api_key=settings.llm_api_key or None,
         temperature=settings.llm_temperature,
         max_tokens=settings.llm_max_tokens,
+        timeout=settings.llm_request_timeout_s,
     )

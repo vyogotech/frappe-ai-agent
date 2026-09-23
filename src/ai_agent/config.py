@@ -58,8 +58,14 @@ class Settings(BaseSettings):
     # Ollama only. Its default context is too small for the system prompt plus tool results
     # and truncates silently.
     llm_num_ctx: int = 16384
+    # One model call's bound. Ollama's own client defaults to no timeout at all.
+    llm_request_timeout_s: float = 60.0
 
     # Agent
+    # The turn's wall-clock bound, inside frappe_ai's 120 s so its message still reaches the user.
+    agent_turn_timeout_s: float = 90.0
+    # The longest tool result or history row that may enter the prompt; the rest is cut.
+    agent_prompt_text_max_chars: int = 8000
     # Small models loop exploring schema; the loop runs this // 2 model-tool rounds per turn.
     agent_recursion_limit: int = 50
     # Per-sid rate limit on POST /api/v1/chat. slowapi syntax: "<count>/<period>"
@@ -72,6 +78,9 @@ class Settings(BaseSettings):
 
     # Longer than the MCP server's sid check; a timeout fails the turn (services/chat.py).
     mcp_tools_load_timeout_s: float = 20.0
+
+    # One tool call's bound, on the call and on the session under it.
+    mcp_tool_timeout_s: float = 30.0
 
     # For /health's MCP and Ollama probes; keep it short so a slow downstream cannot stall it.
     health_probe_timeout_s: float = 5.0

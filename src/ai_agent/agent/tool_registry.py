@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -40,10 +41,11 @@ def _exception_to_result(exc: Exception) -> str:
 class ToolRegistry:
     """Wraps a list of LangChain BaseTool into a name → tool lookup."""
 
-    def __init__(self, tools: list[BaseTool]) -> None:
+    def __init__(self, tools: list[BaseTool], timeout_s: float = 30.0) -> None:
         # Dedup-by-name (last-write-wins) — paranoia for MCP servers that
         # surface two tools with the same name across namespaces.
         self._by_name: dict[str, BaseTool] = {t.name: t for t in tools}
+        self._timeout_s = timeout_s
         for t in tools:
             # langchain-mcp-adapters 0.3 returns an MCP isError result as ordinary output
             t.handle_tool_error = False
@@ -79,7 +81,10 @@ class ToolRegistry:
             return f"error: unknown tool {name!r}; available: {sorted(self._by_name)}"
         tool = self._by_name[name]
         try:
-            raw = await tool.ainvoke(args or {})
+            raw = await asyncio.wait_for(tool.ainvoke(args or {}), self._timeout_s)
+        except TimeoutError:
+            logger.warning("tool_call_timed_out", tool=name, timeout_s=self._timeout_s)
+            return f"Tool call failed: {name} timed out after {self._timeout_s:.0f}s"
         except Exception as exc:  # noqa: BLE001 - every tool failure is a result the model reads
             logger.warning(
                 "tool_call_failed", tool=name, error_type=type(exc).__name__, error=str(exc)[:200]

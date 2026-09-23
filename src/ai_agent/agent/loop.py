@@ -36,6 +36,13 @@ _REPEAT_LIMIT = 3
 KB_TOOL = "search_knowledge_base"
 
 
+def cap_for_prompt(text: str, limit: int) -> str:
+    """`text` cut to `limit` characters with a marker, so one piece cannot fill the context."""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n[truncated to {limit} characters]"
+
+
 def _as_data(results: str) -> str:
     """Tool results as data; an inner </tool_results> is cut so no document speaks as the user."""
     fenced = re.sub(r"<\s*/\s*tool_results\s*>", "", results, flags=re.IGNORECASE)
@@ -55,6 +62,7 @@ async def run_agent_loop(
     context_preamble: str = "",
     history: list[BaseMessage] | None = None,
     max_steps: int = 25,
+    tool_result_max_chars: int = 8000,
     callbacks: list[BaseCallbackHandler] | None = None,
     session: str | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
@@ -215,8 +223,10 @@ async def run_agent_loop(
                 # the chat's own files are searched with it; whatever the model wrote is replaced
                 args = {**args, "session": session}
             result = await tool_registry.ainvoke(name, args)
+            # the sources come out of the whole result; only the prompt's copy is capped
             if name == KB_TOOL and (items := _passages(result)):
                 yield {"type": "sources", "items": items}
+            result = cap_for_prompt(result, tool_result_max_chars)
             result_lines.append(f"tool {name}({json.dumps(args, ensure_ascii=False)}) → {result}")
 
         # Replay the model's tool_call envelope as an AIMessage so the

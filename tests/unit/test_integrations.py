@@ -21,6 +21,7 @@ class TestCreateLLM:
             api_key=None,
             temperature=0.2,
             max_tokens=8192,
+            timeout=60.0,
         )
 
     @patch("ai_agent.integrations.llm.init_chat_model")
