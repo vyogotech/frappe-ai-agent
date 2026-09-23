@@ -40,17 +40,25 @@ class FilterResult:
     reason: str = ""
 
 
+# Below this, a fragment is too short to hold a fingerprint in a meaningful context.
+_MIN_LEN = 20
+# The longest pattern, less one character: a window that carries this much of what came
+# before is wide enough for a pattern split across two chunks to be whole in it.
+_OVERLAP = max(len(p) for p in (*_PROMPT_FINGERPRINTS, *_TOOL_NAMES)) - 1
+
+
+def _fingerprint_in(text: str) -> str | None:
+    return next((f for f in _PROMPT_FINGERPRINTS if f in text), None)
+
+
 def detect_system_prompt_leak(text: str) -> FilterResult:
     """Return whether `text` likely leaks the system prompt; a passing mention of tools does not."""
-    if not text or len(text) < 20:
+    if not text or len(text) < _MIN_LEN:
         return FilterResult(leaked=False)
 
-    for fingerprint in _PROMPT_FINGERPRINTS:
-        if fingerprint in text:
-            return FilterResult(
-                leaked=True,
-                reason=f"fingerprint:{fingerprint[:40]}",
-            )
+    fingerprint = _fingerprint_in(text)
+    if fingerprint is not None:
+        return FilterResult(leaked=True, reason=f"fingerprint:{fingerprint[:40]}")
 
     # Tool-name enumeration: 3+ tool names within a single response.
     tool_hits = sum(1 for name in _TOOL_NAMES if name in text)
@@ -63,8 +71,6 @@ def detect_system_prompt_leak(text: str) -> FilterResult:
     return FilterResult(leaked=False)
 
 
-# Stream-friendly stateful filter: keeps a running buffer and reports
-# the first chunk that pushes the buffer over a leak threshold.
 class StreamingLeakFilter:
     """Leak check over a stream: once a chunk trips it, every later chunk reports a leak."""
 
@@ -74,7 +80,11 @@ class StreamingLeakFilter:
     )
 
     def __init__(self) -> None:
-        self._buffer = ""
+        # The tail of what has arrived, not all of it: scanning the whole answer again on
+        # every delta costs the square of its length, on the loop that is streaming it.
+        self._tail = ""
+        self._chars = 0
+        self._tools_seen: set[str] = set()
         self._triggered = False
 
     def observe(self, chunk_text: str) -> FilterResult:
@@ -82,11 +92,25 @@ class StreamingLeakFilter:
             return FilterResult(leaked=True, reason="already_triggered")
         if not chunk_text:
             return FilterResult(leaked=False)
-        self._buffer += chunk_text
-        verdict = detect_system_prompt_leak(self._buffer)
-        if verdict.leaked:
+        window = self._tail + chunk_text
+        self._chars += len(chunk_text)
+        self._tail = window[-_OVERLAP:]
+        if self._chars < _MIN_LEN:
+            return FilterResult(leaked=False)
+
+        fingerprint = _fingerprint_in(window)
+        if fingerprint is not None:
             self._triggered = True
-        return verdict
+            return FilterResult(leaked=True, reason=f"fingerprint:{fingerprint[:40]}")
+
+        # Names are counted over the whole answer, so each one is remembered once it is seen.
+        self._tools_seen.update(name for name in _TOOL_NAMES if name in window)
+        if len(self._tools_seen) >= 3:
+            self._triggered = True
+            return FilterResult(
+                leaked=True, reason=f"tool_name_enumeration:{len(self._tools_seen)}"
+            )
+        return FilterResult(leaked=False)
 
     @property
     def triggered(self) -> bool:
