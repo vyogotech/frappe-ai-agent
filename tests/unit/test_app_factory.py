@@ -49,19 +49,13 @@ class TestCreateApp:
         # Why: routers wired inside `lifespan` are invisible until first
         # request — regression guard for that mistake.
         settings = Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
-        app = create_app(settings)
+        # no `with`: the lifespan never runs, so only a factory-time route can answer
+        client = TestClient(create_app(settings))
 
-        chat_route = next(
-            (r for r in app.routes if getattr(r, "path", None) == "/api/v1/chat"),
-            None,
-        )
-        assert chat_route is not None, "POST /api/v1/chat not registered at factory time"
-        assert "POST" in getattr(chat_route, "methods", set())
-
-        # Sanity: REST routes too.
-        rest_paths = {getattr(r, "path", None) for r in app.routes}
-        assert "/health" in rest_paths
-        assert "/config" in rest_paths
+        # 404 would mean the route does not exist, 405 that POST is not its method
+        assert client.post("/api/v1/chat", json={"message": "x"}).status_code not in (404, 405)
+        assert client.get("/health").status_code == 200
+        assert client.get("/config").status_code != 404
 
     def test_sid_or_ip_key_falls_back_to_ip_when_sid_missing(self):
         """`_sid_or_ip_key` is the slowapi key function. On the chat
