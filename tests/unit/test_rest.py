@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from ai_agent.config import Settings
+from ai_agent.middleware.sid import UserContext, require_sid
 from ai_agent.services.health import HealthService
 from ai_agent.transport.rest import create_rest_router
 
@@ -30,6 +31,8 @@ def app(settings, health_service):
     app = FastAPI()
     router = create_rest_router(settings=settings, health_service=health_service)
     app.include_router(router)
+    # /config takes a sid; the auth itself is covered by test_config_auth.py
+    app.dependency_overrides[require_sid] = lambda: UserContext(sid="test-session")
     return app
 
 
