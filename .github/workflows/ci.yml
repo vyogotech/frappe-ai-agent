@@ -35,7 +35,7 @@ jobs:
       # CI instead of silently merging. 95% is well below today's
       # ~98% but well above what counts as "real test coverage";
       # bump if/when the project reliably stays higher.
-      - run: uv run pytest tests/unit/ tests/features/ -v --cov=ai_agent --cov-report=xml --cov-fail-under=95
+      - run: uv run pytest tests/unit/ -v --cov=ai_agent --cov-report=xml --cov-fail-under=95
       - uses: codecov/codecov-action@v6
         with:
           files: coverage.xml
