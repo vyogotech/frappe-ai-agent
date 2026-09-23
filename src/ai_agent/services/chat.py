@@ -323,9 +323,8 @@ class ChatService:
                         else:
                             history_messages.append(AIMessage(content=content))
 
-                # Persist the user's message. Best-effort: a Frappe outage must
-                # not abort the chat turn — log and continue. A confirmed turn has no message of the
-                # user's, and saving the agent's stand-in line would replay it as one next turn.
+                # A confirmed turn has no message of the user's, and saving the agent's
+                # stand-in line would replay it as one next turn.
                 if confirmation is None and (
                     await self._history.save_message(
                         sid=user_context.sid,
