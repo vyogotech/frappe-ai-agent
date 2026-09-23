@@ -560,6 +560,7 @@ openai = [
 [package.dev-dependencies]
 dev = [
     { name = "import-linter" },
+    { name = "langchain-openai" },
     { name = "pyright" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -597,6 +598,7 @@ provides-extras = ["openai", "anthropic", "google"]
 [package.metadata.requires-dev]
 dev = [
     { name = "import-linter", specifier = ">=2.3" },
+    { name = "langchain-openai", specifier = ">=0.3" },
     { name = "pyright", specifier = ">=1.1.409" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
