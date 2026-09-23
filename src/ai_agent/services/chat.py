@@ -53,10 +53,6 @@ CONFIRMED_TURN = "The user allowed this action and it has run. Tell them the res
 # The turn is already over when a stopped answer is written, so that save gets its own budget.
 _STOPPED_SAVE_TIMEOUT_S = 5
 
-# MCP tools/list timeout moved to Settings.mcp_tools_load_timeout_s so ops
-# can tune it per-environment (slow LAN, busy MCP). The constant lookup
-# stays local to keep the call site readable.
-
 
 async def _until(
     deadline: float, events: AsyncGenerator[dict[str, Any], None]
@@ -156,6 +152,114 @@ def _usage(decode: _DecodeUsage, first_token: float | None) -> dict[str, float]:
     )
 
 
+def _confirmed_call(confirmation: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The write the user allowed, as the agent loop's `confirmed` argument."""
+    if not confirmation:
+        return None
+    return {"name": confirmation["tool"], "arguments": confirmation.get("arguments") or {}}
+
+
+def _done_event(
+    tools_called: list[str], *, failed: bool, degraded: bool, usage: dict[str, float]
+) -> dict[str, Any]:
+    """The turn's closing frame: what ran, and what the answer it produced is worth."""
+    return {
+        "type": "done",
+        "tools_called": tools_called,
+        "data_quality": "low" if failed or degraded else "high",
+        "timestamp": _utcnow_rfc3339_z(),
+        **({"usage": usage} if usage else {}),
+    }
+
+
+class _TurnEvents:
+    """One turn's events as they arrive: what each leaves behind, and the leak filter's veto."""
+
+    def __init__(self) -> None:
+        self.tools_called: list[str] = []
+        # Final user-visible content (text blocks from the agent loop's
+        # last iteration), accumulated for history persistence.
+        self.text_parts: list[str] = []
+        # Kept with the assistant message so a reopened chat shows what the live one did.
+        self.sources: list[dict[str, Any]] = []
+        self.blocks: list[dict[str, Any]] = []
+        self.first_token: float | None = None  # seconds until the first answer text went out
+        # The prompt forbids disclosure; small models get talked past it.
+        self._leak_filter = StreamingLeakFilter()
+        self._leaked = False
+
+    def observe(self, ev: dict[str, Any], *, t0: float, session_id: str) -> list[dict[str, Any]]:
+        """What to send on for `ev`: itself, a refusal in its place, or nothing at all."""
+        if self._leaked:
+            # Drain remaining events without emitting them so the LLM can complete the turn but
+            # the user only sees the refusal we already published.
+            return []
+        if ev["type"] == "tool_call":
+            self.tools_called.append(ev["name"])
+        elif ev["type"] == "content_block":
+            self.blocks.append(ev["block"])
+        elif ev["type"] == "sources":
+            self.sources.extend(ev["items"])
+        elif ev["type"] == "content":
+            return self._observe_content(ev, t0=t0, session_id=session_id)
+        return [ev]
+
+    def _observe_content(
+        self, ev: dict[str, Any], *, t0: float, session_id: str
+    ) -> list[dict[str, Any]]:
+        verdict = self._leak_filter.observe(ev.get("text", ""))
+        if verdict.leaked:
+            self._leaked = True
+            logger.warning(
+                "system_prompt_leak_suppressed", session_id=session_id, reason=verdict.reason
+            )
+            # Refusal text, not an error event, which drops the text shown.
+            refusal = "\n\n" + StreamingLeakFilter.SAFE_REFUSAL_MESSAGE
+            self.text_parts.append(refusal)
+            return [{"type": "content", "text": refusal}]
+        self.text_parts.append(ev["text"])
+        if self.first_token is None:
+            self.first_token = round(time.perf_counter() - t0, 3)
+        return [ev]
+
+
+def _log_completed(
+    span: trace.Span,
+    events: _TurnEvents,
+    *,
+    session_id: str | None,
+    t0: float,
+    failed: bool,
+    degraded: bool,
+    tools_failed: int,
+    error_type: str | None,
+) -> None:
+    """The turn's record on its span and in the log, once the client has been told it is done."""
+    content_chars = sum(len(p) for p in events.text_parts)
+    span.set_attribute("tools_called_count", len(events.tools_called))
+    span.set_attribute("tools_failed_count", tools_failed)
+    span.set_attribute("content_chars", content_chars)
+    span.set_attribute("block_events_emitted", len(events.blocks))
+    span.set_attribute("failed", failed)
+    if error_type is not None:
+        span.set_attribute("error_type", error_type)
+
+    summary: dict[str, Any] = {
+        "session_id": session_id,
+        "duration_ms": (time.perf_counter() - t0) * 1000.0,
+        "tools_called": events.tools_called,
+        "tools_called_count": len(events.tools_called),
+        "tools_failed_count": tools_failed,
+        "content_chars": content_chars,
+        "block_events_emitted": len(events.blocks),
+        "failed": failed,
+        "degraded": degraded,
+    }
+    if error_type is not None:
+        summary["error_type"] = error_type
+    logger.info("chat_turn_completed", **summary)
+
+
 @contextmanager
 def _log_when_cancelled(
     turn: dict[str, Any], tools_called: list[str], parts: list[str]
@@ -194,6 +298,112 @@ class ChatService:
         """Release any owned async resources (HTTP connection pools, etc.)."""
         await self._history.aclose()
 
+    async def _open_session(
+        self, *, sid: str, session_id: str | None, title: str, context: dict[str, Any]
+    ) -> tuple[str, bool]:
+        """The session row this turn writes to, and whether Frappe took it."""
+        context_json = json.dumps(context or {})
+        if session_id is not None:
+            # save_message 417s until this row exists; a duplicate create is a no-op.
+            await self._history.ensure_session(
+                sid=sid, name=session_id, title=_derive_title(title), context_json=context_json
+            )
+            return session_id, True
+        created = await self._history.create_session(
+            sid=sid, title=_derive_title(title), context_json=context_json
+        )
+        if created is not None:
+            return created, True
+        temporary = f"tmp-{uuid4().hex[:8]}"
+        logger.warning("chat_history_session_create_failed_using_tmp", session_id=temporary)
+        return temporary, False
+
+    async def _history_messages(self, *, sid: str, session_id: str) -> list[BaseMessage]:
+        """The session's earlier turns as prompt messages, each capped to what a prompt may hold."""
+        if not session_id or session_id.startswith("tmp-"):
+            return []
+        rows = await self._history.list_messages(sid=sid, session=session_id, limit=20)
+        limit = self._settings.agent_prompt_text_max_chars
+        return [
+            HumanMessage(content=cap_for_prompt(row["content"], limit))
+            if row["role"] == "user"
+            else AIMessage(content=cap_for_prompt(row["content"], limit))
+            for row in rows
+        ]
+
+    async def _load_tools(
+        self, *, sid: str, session_id: str, confirmation: dict[str, Any] | None
+    ) -> tuple[list[Any], str | None]:
+        """The caller's tools, or none of them and the line telling the model why it has none."""
+        # Per-request MCP client carrying the caller's sid cookie.
+        mcp_client = build_mcp_client_for_sid(
+            self._settings, sid, confirmation["token"] if confirmation else None
+        )
+        tools: list[Any] = []
+        unavailable_reason: str | None = None
+        tools_load_timeout_s = self._settings.mcp_tools_load_timeout_s
+        with _tracer.start_as_current_span("agent.load_tools") as load_span:
+            try:
+                tools = await asyncio.wait_for(
+                    mcp_client.get_tools(),
+                    timeout=tools_load_timeout_s,
+                )
+            except TimeoutError as exc:
+                # Timeout deserves an explicit error event — the user
+                # likely waited the full window and is still owed a
+                # response.
+                logger.warning(
+                    "chat_tools_load_timed_out",
+                    session_id=session_id,
+                    mcp_url=self._settings.mcp_server_url,
+                    timeout_s=tools_load_timeout_s,
+                )
+                raise TurnFailure(TOOLS_TIMED_OUT) from exc
+            except Exception as exc:  # noqa: BLE001 - without tools the model still answers
+                root = _root_cause(exc)
+                unavailable_reason = _tools_unavailable_message(root)
+                logger.warning(
+                    "chat_tools_load_failed_soft_degrade",
+                    session_id=session_id,
+                    mcp_url=self._settings.mcp_server_url,
+                    error_type=type(root).__name__,
+                    error=str(root)[:200],
+                )
+                load_span.set_attribute("failed", True)
+                load_span.set_attribute("error_type", type(root).__name__)
+                load_span.set_attribute("degraded", True)
+                tools = []
+            load_span.set_attribute("tool_count", len(tools))
+
+        pre_count = len(tools)
+        tools = filter_deprecated(tools)
+        if pre_count != len(tools):
+            load_span.set_attribute("tools_filtered", pre_count - len(tools))
+
+        logger.debug(
+            "chat_tools_loaded",
+            count=len(tools),
+            session_id=session_id,
+        )
+        return tools, unavailable_reason
+
+    def _system_prompt(self, context: dict[str, Any], tools_unavailable_reason: str | None) -> str:
+        """The turn's system prompt, carrying the note the model needs when its tools are down."""
+        preamble = self._build_system_prompt(context or {})
+        if tools_unavailable_reason is None:
+            return preamble
+        # Soft-degraded: tell the model so it answers data
+        # questions with a "I can't fetch that right now"
+        # text block instead of hallucinating values.
+        return preamble + (
+            "\n\n# Tool status\n\n"
+            f"NOTE: {tools_unavailable_reason} "
+            "Answer conversational questions normally, but for "
+            "questions that need real data emit a text block "
+            "explaining tools are temporarily unavailable. "
+            "Do not fabricate data."
+        )
+
     async def handle_message(
         self,
         *,
@@ -205,23 +415,15 @@ class ChatService:
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Yield one turn's SSE events; an AsyncGenerator, so aclose() can stop it on disconnect."""
         user_message = CONFIRMED_TURN if confirmation else (message or "")
-        tools_called: list[str] = []
+        events = _TurnEvents()
         # Rebound below to the registry's own rows, which carry each call's outcome; empty
         # until then, so a turn that never gets a registry still saves and still ends.
         tool_invocations: list[dict[str, Any]] = []
-        # Final user-visible content (text blocks from the agent loop's
-        # last iteration), accumulated for history persistence.
-        assistant_text_parts: list[str] = []
-        # Kept with the assistant message so a reopened chat shows what the live one did.
-        sources_seen: list[dict[str, Any]] = []
-        blocks_seen: list[dict[str, Any]] = []
         decode = _DecodeUsage()
         # One clock for the turn: perf_counter, not time(), so a system-clock jump cannot move it.
         t0 = time.perf_counter()
         # The whole turn's budget, so the history read and the tool load spend it too.
         deadline = asyncio.get_running_loop().time() + self._settings.agent_turn_timeout_s
-        first_token: float | None = None  # seconds until the first answer text went out
-        block_events_emitted = 0
         failed = False
         # Set where the turn falls short of what its answer implies: a tool call that came back
         # an error, a row Frappe would not take. `done` carries it, so nothing reports high
@@ -240,16 +442,16 @@ class ChatService:
                 except (TypeError, ValueError):
                     # Arguments weren't JSON-serialisable — drop them silently.
                     tool_args_json = None
-            usage = _usage(decode, first_token)
+            usage = _usage(decode, events.first_token)
             saved_sources = list(
-                {(s.get("file"), s.get("seq")): _source_ref(s) for s in sources_seen}.values()
+                {(s.get("file"), s.get("seq")): _source_ref(s) for s in events.sources}.values()
             )
             tool_result_json = (
                 json.dumps(
-                    {"sources": saved_sources, "blocks": blocks_seen}
+                    {"sources": saved_sources, "blocks": events.blocks}
                     | ({"usage": usage} if usage else {})
                 )
-                if sources_seen or blocks_seen or usage
+                if events.sources or events.blocks or usage
                 else None
             )
             # The client turns every Frappe failure into None and logs it; nothing is left here
@@ -277,32 +479,17 @@ class ChatService:
         turn: dict[str, Any] = {"session_id": session_id, "t0": t0}
         with (
             _tracer.start_as_current_span("agent.chat_turn") as turn_span,
-            _log_when_cancelled(turn, tools_called, assistant_text_parts),
+            _log_when_cancelled(turn, events.tools_called, events.text_parts),
         ):
             try:
-                if session_id is None:
-                    created = await self._history.create_session(
-                        sid=user_context.sid,
-                        title=_derive_title(user_message),
-                        context_json=json.dumps(context or {}),
-                    )
-                    if created is None:
-                        degraded = True
-                        session_id = f"tmp-{uuid4().hex[:8]}"
-                        logger.warning(
-                            "chat_history_session_create_failed_using_tmp",
-                            session_id=session_id,
-                        )
-                    else:
-                        session_id = created
-                else:
-                    # save_message 417s until this row exists; a duplicate create is a no-op.
-                    await self._history.ensure_session(
-                        sid=user_context.sid,
-                        name=session_id,
-                        title=_derive_title(user_message),
-                        context_json=json.dumps(context or {}),
-                    )
+                session_id, session_saved = await self._open_session(
+                    sid=user_context.sid,
+                    session_id=session_id,
+                    title=user_message,
+                    context=context,
+                )
+                if not session_saved:
+                    degraded = True
 
                 turn_span.set_attribute("session_id", session_id)
                 turn["session_id"] = session_id
@@ -311,21 +498,9 @@ class ChatService:
                 yield {"type": "session", "id": session_id}
 
                 # Read before the question is saved, so the history holds only earlier turns.
-                history_messages: list[BaseMessage] = []
-                if session_id and not session_id.startswith("tmp-"):
-                    rows = await self._history.list_messages(
-                        sid=user_context.sid,
-                        session=session_id,
-                        limit=20,
-                    )
-                    for row in rows:
-                        content = cap_for_prompt(
-                            row["content"], self._settings.agent_prompt_text_max_chars
-                        )
-                        if row["role"] == "user":
-                            history_messages.append(HumanMessage(content=content))
-                        else:
-                            history_messages.append(AIMessage(content=content))
+                history_messages = await self._history_messages(
+                    sid=user_context.sid, session_id=session_id
+                )
 
                 # A confirmed turn has no message of the user's, and saving the agent's
                 # stand-in line would replay it as one next turn.
@@ -340,72 +515,10 @@ class ChatService:
                 ):
                     degraded = True
 
-                # Per-request MCP client carrying the caller's sid cookie.
-                mcp_client = build_mcp_client_for_sid(
-                    self._settings,
-                    user_context.sid,
-                    confirmation["token"] if confirmation else None,
+                tools, tools_unavailable_reason = await self._load_tools(
+                    sid=user_context.sid, session_id=session_id, confirmation=confirmation
                 )
-                tools: list[Any] = []
-                tools_unavailable_reason: str | None = None
-                tools_load_timeout_s = self._settings.mcp_tools_load_timeout_s
-                with _tracer.start_as_current_span("agent.load_tools") as load_span:
-                    try:
-                        tools = await asyncio.wait_for(
-                            mcp_client.get_tools(),
-                            timeout=tools_load_timeout_s,
-                        )
-                    except TimeoutError as exc:
-                        # Timeout deserves an explicit error event — the user
-                        # likely waited the full window and is still owed a
-                        # response.
-                        logger.warning(
-                            "chat_tools_load_timed_out",
-                            session_id=session_id,
-                            mcp_url=self._settings.mcp_server_url,
-                            timeout_s=tools_load_timeout_s,
-                        )
-                        raise TurnFailure(TOOLS_TIMED_OUT) from exc
-                    except Exception as exc:  # noqa: BLE001 - without tools the model still answers
-                        root = _root_cause(exc)
-                        tools_unavailable_reason = _tools_unavailable_message(root)
-                        logger.warning(
-                            "chat_tools_load_failed_soft_degrade",
-                            session_id=session_id,
-                            mcp_url=self._settings.mcp_server_url,
-                            error_type=type(root).__name__,
-                            error=str(root)[:200],
-                        )
-                        load_span.set_attribute("failed", True)
-                        load_span.set_attribute("error_type", type(root).__name__)
-                        load_span.set_attribute("degraded", True)
-                        tools = []
-                    load_span.set_attribute("tool_count", len(tools))
-
-                pre_count = len(tools)
-                tools = filter_deprecated(tools)
-                if pre_count != len(tools):
-                    load_span.set_attribute("tools_filtered", pre_count - len(tools))
-
-                logger.debug(
-                    "chat_tools_loaded",
-                    count=len(tools),
-                    session_id=session_id,
-                )
-
-                context_preamble = self._build_system_prompt(context or {})
-                if tools_unavailable_reason is not None:
-                    # Soft-degraded: tell the model so it answers data
-                    # questions with a "I can't fetch that right now"
-                    # text block instead of hallucinating values.
-                    context_preamble += (
-                        "\n\n# Tool status\n\n"
-                        f"NOTE: {tools_unavailable_reason} "
-                        "Answer conversational questions normally, but for "
-                        "questions that need real data emit a text block "
-                        "explaining tools are temporarily unavailable. "
-                        "Do not fabricate data."
-                    )
+                context_preamble = self._system_prompt(context, tools_unavailable_reason)
                 tool_registry = ToolRegistry(tools, self._settings.mcp_tool_timeout_s)
                 tool_invocations = tool_registry.invocations
 
@@ -415,9 +528,6 @@ class ChatService:
                     run_span.set_attribute("tool_count", len(tool_registry))
                     run_span.set_attribute("max_steps", max_steps)
                     run_span.set_attribute("history_turns", len(history_messages))
-                    # The prompt forbids disclosure; small models get talked past it.
-                    leak_filter = StreamingLeakFilter()
-                    leak_triggered = False
                     async for ev in _until(
                         deadline,
                         run_agent_loop(
@@ -430,46 +540,11 @@ class ChatService:
                             tool_result_max_chars=self._settings.agent_prompt_text_max_chars,
                             callbacks=[decode],
                             session=session_id,
-                            confirmed=(
-                                {
-                                    "name": confirmation["tool"],
-                                    "arguments": confirmation.get("arguments") or {},
-                                }
-                                if confirmation
-                                else None
-                            ),
+                            confirmed=_confirmed_call(confirmation),
                         ),
                     ):
-                        if leak_triggered:
-                            # Drain remaining events without emitting them so
-                            # the LLM can complete the turn but the user only
-                            # sees the refusal we already published.
-                            continue
-                        if ev["type"] == "tool_call":
-                            tools_called.append(ev["name"])
-                        elif ev["type"] == "content_block":
-                            block_events_emitted += 1
-                            blocks_seen.append(ev["block"])
-                        elif ev["type"] == "sources":
-                            sources_seen.extend(ev["items"])
-                        elif ev["type"] == "content":
-                            verdict = leak_filter.observe(ev.get("text", ""))
-                            if verdict.leaked:
-                                leak_triggered = True
-                                logger.warning(
-                                    "system_prompt_leak_suppressed",
-                                    session_id=session_id,
-                                    reason=verdict.reason,
-                                )
-                                # Refusal text, not an error event, which drops the text shown.
-                                refusal = StreamingLeakFilter.SAFE_REFUSAL_MESSAGE
-                                assistant_text_parts.append("\n\n" + refusal)
-                                yield {"type": "content", "text": "\n\n" + refusal}
-                                continue
-                            assistant_text_parts.append(ev["text"])
-                            if first_token is None:
-                                first_token = round(time.perf_counter() - t0, 3)
-                        yield ev
+                        for out in events.observe(ev, t0=t0, session_id=session_id):
+                            yield out
 
                     # a tool the turn asked for and did not get: the answer is not fully backed
                     degraded = degraded or bool(_failed_calls(tool_registry.invocations))
@@ -477,10 +552,10 @@ class ChatService:
             except (asyncio.CancelledError, GeneratorExit):
                 # Stop, a dropped socket or a killed worker: the user read the text that arrived,
                 # so keep it before the cancellation finishes unwinding this turn.
-                if assistant_text_parts and session_id is not None:
+                if events.text_parts and session_id is not None:
                     with anyio.move_on_after(_STOPPED_SAVE_TIMEOUT_S, shield=True):
                         await save_answer(
-                            _saved_answer(assistant_text_parts, ANSWER_STOPPED), session_id
+                            _saved_answer(events.text_parts, ANSWER_STOPPED), session_id
                         )
                 raise
 
@@ -512,47 +587,31 @@ class ChatService:
                 yield {"type": "error", "message": error_message}
 
             assistant_content = (
-                _saved_answer(assistant_text_parts, error_message)
+                _saved_answer(events.text_parts, error_message)
                 if failed
-                else "".join(assistant_text_parts)
+                else "".join(events.text_parts)
             )
             if session_id is not None:  # the session write itself is what failed; nowhere to save
                 await save_answer(assistant_content, session_id)
 
-            usage = _usage(decode, first_token)
             # A tool failure never raises — it comes back as a result the model reads — so a
             # turn built on one is still answered, and it is the answer that is worth less.
             tools_failed = _failed_calls(tool_invocations)
-            yield {
-                "type": "done",
-                "tools_called": tools_called,
-                "data_quality": "low" if failed or degraded else "high",
-                "timestamp": _utcnow_rfc3339_z(),
-                **({"usage": usage} if usage else {}),
-            }
-
-            content_chars = sum(len(p) for p in assistant_text_parts)
-            turn_span.set_attribute("tools_called_count", len(tools_called))
-            turn_span.set_attribute("tools_failed_count", tools_failed)
-            turn_span.set_attribute("content_chars", content_chars)
-            turn_span.set_attribute("block_events_emitted", block_events_emitted)
-            turn_span.set_attribute("failed", failed)
-            if error_type is not None:
-                turn_span.set_attribute("error_type", error_type)
+            yield _done_event(
+                events.tools_called,
+                failed=failed,
+                degraded=degraded,
+                usage=_usage(decode, events.first_token),
+            )
 
             # After `done`, so a turn the client cancels is not logged as completed.
-            duration_ms = (time.perf_counter() - t0) * 1000.0
-            summary: dict[str, Any] = {
-                "session_id": session_id,
-                "duration_ms": duration_ms,
-                "tools_called": tools_called,
-                "tools_called_count": len(tools_called),
-                "tools_failed_count": tools_failed,
-                "content_chars": content_chars,
-                "block_events_emitted": block_events_emitted,
-                "failed": failed,
-                "degraded": degraded,
-            }
-            if error_type is not None:
-                summary["error_type"] = error_type
-            logger.info("chat_turn_completed", **summary)
+            _log_completed(
+                turn_span,
+                events,
+                session_id=session_id,
+                t0=t0,
+                failed=failed,
+                degraded=degraded,
+                tools_failed=tools_failed,
+                error_type=error_type,
+            )
