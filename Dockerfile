@@ -1,11 +1,17 @@
 # Stage 1: Builder
 FROM python:3.12-slim AS builder
 WORKDIR /app
-RUN pip install uv
+# uv hardlinks from its cache into .venv; a cache mount is a separate filesystem,
+# so copy instead of warning and falling back on every package (uv's Docker guide)
+ENV UV_LINK_MODE=copy
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install uv
 COPY pyproject.toml .
-RUN uv sync --no-dev --no-install-project
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --no-dev --no-install-project
 COPY src/ src/
-RUN uv sync --no-dev --no-editable
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --no-dev --no-editable
 
 # Stage 2: Runtime
 FROM python:3.12-slim

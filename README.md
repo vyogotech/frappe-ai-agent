@@ -445,7 +445,7 @@ docker build -t frappe-ai-agent .
 docker run -p 8484:8484 --env-file .env frappe-ai-agent
 ```
 
-The Dockerfile is a two-stage UV build that runs as a non-root user and ships a `HEALTHCHECK` hitting `GET /health`. `docker-compose.yml` builds the agent in isolation; `docker-compose.dev.yml.example` shows how to stack it with `frappe-mcp-server` for end-to-end dev.
+The Dockerfile is a two-stage UV build that runs as a non-root user and ships a `HEALTHCHECK` hitting `GET /health`. Its `pip` and `uv` downloads go to BuildKit cache mounts, so a rebuild after a dependency change resolves from the local cache; `docker buildx prune` and `docker system prune` wipe them with the rest of the build cache, `docker buildx prune --filter 'type!=exec.cachemount'` keeps them, and `docker build --no-cache` hands the build an empty mount rather than reusing one. `docker-compose.yml` builds the agent in isolation; `docker-compose.dev.yml.example` shows how to stack it with `frappe-mcp-server` for end-to-end dev.
 
 ## CI
 
