@@ -54,7 +54,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         system_prompt_builder=build_system_prompt,
     )
     health_service = HealthService(settings=settings)
-    limiter = Limiter(key_func=_sid_or_ip_key)
+    limiter = Limiter(key_func=_sid_or_ip_key, storage_uri=settings.rate_limit_storage_uri)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

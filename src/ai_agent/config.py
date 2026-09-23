@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from limits import parse_many
+from limits.errors import ConfigurationError
+from limits.storage import storage_from_string
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -33,6 +35,17 @@ class Settings(BaseSettings):
     def _rate_limit_parses(cls, v: str) -> str:
         # slowapi stops limiting on a string it cannot read, so refuse one at startup
         parse_many(v)
+        return v
+
+    @field_validator("rate_limit_storage_uri")
+    @classmethod
+    def _storage_uri_opens(cls, v: str) -> str:
+        # a uri limits cannot read leaves every process counting for itself, which looks like a
+        # working limit until the second worker starts; refuse it at startup instead
+        try:
+            storage_from_string(v)
+        except ConfigurationError as exc:
+            raise ValueError(f"rate_limit_storage_uri: {exc}") from exc
         return v
 
     @field_validator("cors_origins")
@@ -71,6 +84,9 @@ class Settings(BaseSettings):
     # Per-sid rate limit on POST /api/v1/chat. slowapi syntax: "<count>/<period>"
     # (minute / second / hour / day).
     agent_rate_limit: str = "30/minute"
+    # Where the limiter keeps its counters. The default is this process, so the limit is
+    # agent_rate_limit x workers x replicas; point every process at one redis:// to share it.
+    rate_limit_storage_uri: str = "memory://"
 
     # MCP: Streamable HTTP endpoint. frappe-mcp-server mounts /mcp on its
     # main HTTP port (default 8080), NOT the port+1 MCP-protocol-only server.

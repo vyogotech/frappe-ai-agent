@@ -142,7 +142,7 @@ All settings are loaded from environment or `.env` with the `AI_AGENT_` prefix. 
 |----------|---------|-------------|
 | `AI_AGENT_HOST` | `0.0.0.0` | Bind host |
 | `AI_AGENT_PORT` | `8484` | Bind port |
-| `AI_AGENT_WORKERS` | `1` | Uvicorn workers. Wired into the Dockerfile CMD as `uvicorn --workers ${AI_AGENT_WORKERS:-1}`. The agent is stateless per-request (history is fetched from Frappe each turn), but each worker keeps its own count for `AI_AGENT_AGENT_RATE_LIMIT`, so N workers let one session make N times that many requests. |
+| `AI_AGENT_WORKERS` | `1` | Uvicorn workers. Wired into the Dockerfile CMD as `uvicorn --workers ${AI_AGENT_WORKERS:-1}`. The agent is stateless per-request (history is fetched from Frappe each turn), but each worker keeps its own count for `AI_AGENT_AGENT_RATE_LIMIT` unless `AI_AGENT_RATE_LIMIT_STORAGE_URI` points them at a shared store, so N workers otherwise let one session make N times that many requests. |
 | `AI_AGENT_CORS_ORIGINS` | `["http://localhost:8000"]` | JSON list of credentialed-CORS origins. `"*"` is not allowed because cookies are forwarded |
 | `AI_AGENT_LLM_PROVIDER` | `ollama` | `ollama`, `openai`, `anthropic`, `google` |
 | `AI_AGENT_LLM_BASE_URL` | `http://localhost:11434` | Provider base URL |
@@ -156,6 +156,7 @@ All settings are loaded from environment or `.env` with the `AI_AGENT_` prefix. 
 | `AI_AGENT_AGENT_PROMPT_TEXT_MAX_CHARS` | `8000` | Longest single tool result or history row that may enter the prompt; the rest is cut with a `[truncated to N characters]` marker |
 | `AI_AGENT_AGENT_RECURSION_LIMIT` | `50` | Envelope-loop recursion ceiling — small models need headroom while exploring doctype schemas before converging |
 | `AI_AGENT_AGENT_RATE_LIMIT` | `30/minute` | slowapi-format per-sid rate limit on `POST /api/v1/chat` (e.g. `100/hour`, `10/second`) |
+| `AI_AGENT_RATE_LIMIT_STORAGE_URI` | `memory://` | Where the limiter keeps its counters. The default is this process, so the effective limit is `AI_AGENT_AGENT_RATE_LIMIT` x workers x replicas. Point every process at one `redis://host:6379/0` to share a single budget. A uri `limits` cannot open is refused at startup rather than falling back to the process |
 | `AI_AGENT_MCP_SERVER_URL` | `http://localhost:8080/mcp` | MCP Streamable HTTP endpoint |
 | `AI_AGENT_MCP_TOOLS_LOAD_TIMEOUT_S` | `20.0` | Per-request bound on `tools/list`. A timeout becomes a single SSE `error` event, not a hung stream |
 | `AI_AGENT_MCP_TOOL_TIMEOUT_S` | `30.0` | Bound on one tool call, and on the HTTP and SSE read timeouts of the MCP session under it. A timeout comes back as a tool result the model can answer around |

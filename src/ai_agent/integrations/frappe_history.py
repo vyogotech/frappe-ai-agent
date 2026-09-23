@@ -33,6 +33,11 @@ _DEFAULT_TIMEOUT = 10.0
 # ponytail: a big table is cut here; the general answer is the tool-output ceiling, P14
 _BLOCKS_CHARS = 4000
 
+# Every entry is a live session id, so this cache is a disclosure surface as well as memory.
+# ponytail: oldest-out, not least-recently-used; recency would need an OrderedDict and buys
+# one desk-page fetch at this size.
+_CSRF_CACHE_MAX = 1000
+
 
 def _with_blocks(text: str, tool_result_json: Any) -> str:
     """The answer as shown, blocks included: a follow-up such as "the first one" points at them."""
@@ -248,6 +253,8 @@ class FrappeHistoryClient:
             return cached
         fresh = await self._fetch_csrf_token(sid)
         if fresh:
+            while len(self._csrf_cache) >= _CSRF_CACHE_MAX:
+                del self._csrf_cache[next(iter(self._csrf_cache))]
             self._csrf_cache[sid] = fresh
         return fresh
 
