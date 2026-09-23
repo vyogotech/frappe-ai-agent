@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import httpx
+from fastapi import HTTPException
 from starlette.requests import Request
 
 
@@ -44,3 +45,17 @@ async def signed_in_user(frappe_url: str, sid: str) -> str | None:
     response.raise_for_status()
     user = response.json().get("message")
     return user if isinstance(user, str) and user and user != "Guest" else None
+
+
+async def require_sid(request: Request) -> UserContext:
+    """Auth as a dependency: on chat it precedes @limiter.limit, so a 401 spends no token."""
+    user_context = extract_user_context(request)
+    if user_context is None:
+        raise HTTPException(status_code=401, detail="Missing sid cookie")
+    try:
+        user = await signed_in_user(request.app.state.settings.frappe_url, user_context.sid)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=503, detail="Cannot check your session right now") from exc
+    if user is None:
+        raise HTTPException(status_code=401, detail="Not signed in")
+    return user_context

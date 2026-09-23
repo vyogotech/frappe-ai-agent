@@ -6,29 +6,15 @@ import json
 from collections.abc import Callable
 from typing import Annotated, Any
 
-import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 from slowapi import Limiter
 
-from ai_agent.middleware.sid import UserContext, extract_user_context, signed_in_user
+# tests override the agent's auth by this name; keep it importable from here
+from ai_agent.middleware.sid import UserContext
+from ai_agent.middleware.sid import require_sid as _require_sid
 from ai_agent.transport.sse_events import serialize
-
-
-async def _require_sid(request: Request) -> UserContext:
-    """Auth as a dependency: it runs before @limiter.limit, so a 401 spends no rate-limit token."""
-    user_context = extract_user_context(request)
-    if user_context is None:
-        raise HTTPException(status_code=401, detail="Missing sid cookie")
-    try:
-        user = await signed_in_user(request.app.state.settings.frappe_url, user_context.sid)
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=503, detail="Cannot check your session right now") from exc
-    if user is None:
-        raise HTTPException(status_code=401, detail="Not signed in")
-    return user_context
-
 
 # context goes into the system prompt, so this caps the tokens one request can spend.
 _MAX_CONTEXT_BYTES = 8 * 1024
