@@ -1,11 +1,11 @@
 # Stage 1: Builder
-FROM python:3.12-slim AS builder
+FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9 AS builder
 WORKDIR /app
 # uv hardlinks from its cache into .venv; a cache mount is a separate filesystem,
 # so copy instead of warning and falling back on every package (uv's Docker guide)
 ENV UV_LINK_MODE=copy
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install uv
+# uv's own image, by digest: `pip install uv` took whatever PyPI served that minute
+COPY --from=ghcr.io/astral-sh/uv:0.12.18@sha256:3adc3706091ce7c2fe595e669628caedd6d951551b92b258b7e7dbe06d9440bc /uv /bin/
 COPY pyproject.toml uv.lock ./
 # --locked: install the committed resolution, and fail the build if pyproject.toml has moved
 # away from it. Without the lock the builder resolves fresh versions on every build.
@@ -16,7 +16,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-editable
 
 # Stage 2: Runtime
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9
 WORKDIR /app
 RUN addgroup --gid 1001 appgroup && adduser --uid 1001 --gid 1001 --disabled-password appuser
 COPY --from=builder /app /app

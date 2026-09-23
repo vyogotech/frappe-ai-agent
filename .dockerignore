@@ -1,0 +1,7 @@
+# context size: the build COPYs pyproject.toml, uv.lock and src/ and nothing else
+.git
+.venv
+audit-out
+**/__pycache__
+# not size: a secret has no business in a build context
+.env
