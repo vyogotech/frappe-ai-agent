@@ -1,0 +1,27 @@
+[importlinter]
+root_package = ai_agent
+
+[importlinter:contract:layers]
+name = A layer imports downwards only
+type = layers
+layers =
+    transport
+    services
+    agent
+    integrations
+    observability
+    config
+containers =
+    ai_agent
+
+[importlinter:contract:leaves]
+name = blocks and middleware are leaves
+type = forbidden
+source_modules =
+    ai_agent.blocks
+    ai_agent.middleware
+forbidden_modules =
+    ai_agent.transport
+    ai_agent.services
+    ai_agent.agent
+    ai_agent.integrations

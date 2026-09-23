@@ -1,4 +1,4 @@
-.PHONY: install test lint format typecheck serve clean audit audit-clean
+.PHONY: install test lint format typecheck boundaries serve clean audit audit-clean
 
 install:
 	uv sync --all-extras
@@ -14,6 +14,9 @@ format:
 
 typecheck:
 	uv run pyright src/
+
+boundaries:
+	uv run lint-imports
 
 serve:
 	uv run uvicorn ai_agent.app:create_app --factory --host 0.0.0.0 --port 8484 --reload
