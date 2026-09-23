@@ -8,9 +8,10 @@ from collections.abc import AsyncGenerator, Iterator
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.callbacks import AsyncCallbackHandler, BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.outputs import LLMResult
 
 if TYPE_CHECKING:
     from langchain_core.messages import BaseMessage
@@ -54,6 +55,35 @@ def _as_data(results: str) -> str:
     )
 
 
+REPLY_CUT_OFF = "The answer was cut short. Try a narrower question."
+
+# what each provider calls "ran out of room"; miss one and a cut-off answer reads as a whole one
+_CUT_OFF_REASONS = frozenset(
+    {
+        "length",
+        "max_tokens",
+        "model_length",
+        "model_context_window_exceeded",
+    }  # ollama/openai, anthropic x2, mistral
+)
+
+
+class _StopReason(AsyncCallbackHandler):
+    """Whether the provider said its last reply ran out of tokens rather than finished."""
+
+    def __init__(self) -> None:
+        self.cut_off = False
+
+    async def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
+        for generations in response.generations:
+            for g in generations:
+                meta = getattr(getattr(g, "message", None), "response_metadata", None) or {}
+                reason = (
+                    meta.get("done_reason") or meta.get("finish_reason") or meta.get("stop_reason")
+                )
+                self.cut_off = str(reason).lower() in _CUT_OFF_REASONS
+
+
 async def run_agent_loop(
     *,
     llm: BaseChatModel,
@@ -93,9 +123,10 @@ async def run_agent_loop(
         emitted: set[int] = set()
         live = True
         emitted_any = False
+        stop = _StopReason()
         try:
             async for partial in structured_llm.astream(
-                messages, config={"callbacks": callbacks or []}
+                messages, config={"callbacks": [*(callbacks or []), stop]}
             ):
                 if not isinstance(partial, dict):
                     continue
@@ -125,6 +156,12 @@ async def run_agent_loop(
                 llm_model=str(llm_model),
             )
             raise
+
+        if stop.cut_off:
+            # The envelope stops wherever the tokens ran out, so its last block — a tool call's
+            # arguments, a number, a sentence — is whatever had been written by then.
+            logger.warning("agent_loop_reply_cut_off", step=step)
+            raise RuntimeError(REPLY_CUT_OFF)
 
         final_envelope = last_partial or {"blocks": []}
         blocks: list[dict[str, Any]] = list(final_envelope.get("blocks") or [])

@@ -410,6 +410,23 @@ explicit non-`finally` design in `src/ai_agent/services/chat.py`
 (see comments around the inner `try/except Exception:` block in
 `handle_message`) was added to avoid.
 
+### The model ran out of tokens mid-answer
+
+**Symptoms:** `agent_loop_reply_cut_off` in the log, and a turn that
+ends with an `error` event and `done` with `data_quality: "low"`.
+
+The provider reported that generation stopped because it hit the
+token cap (`done_reason: "length"` on Ollama, `finish_reason` or
+`stop_reason` elsewhere), so the envelope stops wherever the tokens
+ran out. The loop runs no tool from that reply — a cut-off argument
+would name the wrong document — and ends the turn with "The answer
+was cut short. Try a narrower question." after whatever text had
+already been streamed.
+
+If this is frequent, the answers are longer than the cap: raise
+`AI_AGENT_LLM_MAX_TOKENS` (Ollama `num_predict`, default 8192),
+keeping it inside the model's context window.
+
 ## Docker
 
 ```bash
