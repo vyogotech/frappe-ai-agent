@@ -26,8 +26,9 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
       - run: uv sync --locked --all-extras
-      - run: uv run ruff check src/ tests/
-      - run: uv run ruff format --check src/ tests/
+      - run: make lint
+      - run: make boundaries
+      - run: uvx pre-commit run --all-files
 
   typecheck:
     runs-on: ubuntu-latest
@@ -38,7 +39,7 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
       - run: uv sync --locked --all-extras
-      - run: uv run pyright
+      - run: make typecheck
 
   test:
     runs-on: ubuntu-latest
@@ -49,10 +50,10 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
       - run: uv sync --locked --all-extras
-      # No --cov-fail-under. A percentage pays for a line executed, not for a line asserted,
-      # so the cheapest way to meet a floor is a test with no assertion in it. Coverage is
-      # still measured and uploaded: the report below is where a drop is read and judged.
-      - run: uv run pytest tests/unit/ -v --cov=ai_agent --cov-report=xml
+      # No --cov-fail-under in `make test`. A percentage pays for a line executed, not for a
+      # line asserted, so the cheapest way to meet a floor is a test with no assertion in it.
+      # Coverage is still measured and uploaded: the report below is where a drop is judged.
+      - run: make test
       - uses: codecov/codecov-action@8cad3ba95e5920c42f44492e54bc9639cba47959  # v6.0.2
         with:
           files: coverage.xml
@@ -256,14 +257,14 @@ jobs:
       - name: Install agent deps
         run: uv sync --locked --all-extras
 
-      - name: Run integration tests
+      - name: Run integration tests (make test-integration, with the addresses it needs)
         env:
           AI_AGENT_INTEGRATION_LLM_BASE_URL: http://localhost:11434
           AI_AGENT_INTEGRATION_LLM_MODEL: ${{ env.OLLAMA_MODEL }}
           AI_AGENT_INTEGRATION_MCP_URL: http://localhost:8080/mcp
           AI_AGENT_INTEGRATION_FRAPPE_URL: http://localhost:8000
           AI_AGENT_INTEGRATION_FRAPPE_ADMIN_PASSWORD: admin
-        run: uv run pytest tests/integration/ -m integration -v
+        run: make test-integration
 
       - name: Dump service logs on failure
         if: failure()
@@ -280,7 +281,9 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
-      - run: uvx semgrep scan --metrics=off --error --config p/python src
+      - run: uv sync --locked --all-extras
+      - run: make security
+      - run: make workflows
 
   build:
     runs-on: ubuntu-latest

@@ -1,22 +1,37 @@
-.PHONY: install test lint format typecheck boundaries serve clean audit audit-clean
+.PHONY: install test test-integration lint format typecheck boundaries security workflows serve clean audit audit-clean
 
 install:
 	uv sync --all-extras
 
+# one spelling per check: ci.yml calls these targets, it does not repeat the commands
 test:
-	uv run pytest -v
+	uv run pytest tests/unit/ -v --cov=ai_agent --cov-report=xml
+
+test-integration:
+	uv run pytest tests/integration/ -m integration -v
 
 lint:
 	uv run ruff check src/ tests/
+	uv run ruff format --check src/ tests/
 
 format:
 	uv run ruff format src/ tests/
 
 typecheck:
-	uv run pyright src/
+	uv run pyright
 
 boundaries:
 	uv run lint-imports
+
+# pip-audit reads the synced environment: `-r` makes it build a venv of its own, which
+# ensurepip cannot always create. `uv sync --locked` first, so what it reads is the lock.
+security:
+	uvx semgrep scan --metrics=off --error --config p/python src
+	uvx bandit -q -r -ll src
+	uv run --with pip-audit pip-audit --progress-spinner off --skip-editable
+
+workflows:
+	uvx zizmor --offline .github/workflows
 
 serve:
 	uv run uvicorn ai_agent.app:create_app --factory --host 0.0.0.0 --port 8484 --reload

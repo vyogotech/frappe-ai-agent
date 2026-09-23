@@ -27,6 +27,7 @@ build/
 # Coverage
 htmlcov/
 .coverage
+coverage.xml
 
 # Ruff
 .ruff_cache/
