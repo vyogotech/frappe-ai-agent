@@ -1,0 +1,5 @@
+# A fixture, not a secret: the fake confirmation token in the S18 test that asserts the token never reaches a
+# tool argument, the model, the saved history or the stream. It was 32 hex characters when this commit was made,
+# which gitleaks reads as a generic api key; the working tree now uses a string no scanner can mistake, and this
+# line covers the commit that is already written.
+9db448e19748f6d8785dff50948b92a1565cacdf:tests/unit/test_confirmed_turn.py:generic-api-key:23

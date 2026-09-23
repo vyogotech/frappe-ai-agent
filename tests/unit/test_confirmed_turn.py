@@ -20,7 +20,8 @@ from ai_agent.middleware.sid import UserContext
 from ai_agent.services.chat import ANSWER_STOPPED, CONFIRMED_TURN, ChatService
 from ai_agent.transport.sse import _require_sid, create_sse_router
 
-TOKEN = "3f9c1d7ae2b04c6f8a15e73b9d2c4088"
+# not hex, so a scanner reads it for what it is: the assertions need only a distinctive string
+TOKEN = "not-a-real-confirmation-token-xyzzy"
 STORED = {
     "tool": "create_document",
     "arguments": {"doctype": "Customer", "data": {"customer_name": "Acme"}},
