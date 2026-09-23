@@ -17,6 +17,15 @@ class ToolCallEvent(TypedDict):
     arguments: dict[str, Any]
 
 
+class ToolConfirmEvent(TypedDict):
+    """A write the user has to allow; the turn ends on it and the tool has not run."""
+
+    type: Literal["tool_confirm"]
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+
 class ContentEvent(TypedDict):
     type: Literal["content"]
     text: str
@@ -50,6 +59,7 @@ class DoneEvent(TypedDict):
 SSEEvent = (
     SessionEvent
     | ToolCallEvent
+    | ToolConfirmEvent
     | SourcesEvent
     | ContentEvent
     | ContentBlockEvent
@@ -63,6 +73,7 @@ SSEEvent = (
 _REQUIRED_FIELDS: dict[str, set[str]] = {
     "session": {"id"},
     "tool_call": {"name", "arguments"},
+    "tool_confirm": {"id", "name", "arguments"},
     "content": {"text"},
     "content_block": {"block"},
     "sources": {"items"},

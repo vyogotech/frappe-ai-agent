@@ -19,7 +19,9 @@ def _any_sid(request: Request) -> UserContext:
 class FakeChatService:
     """Minimal stand-in for ChatService so the route can stream without an LLM."""
 
-    async def handle_message(self, *, message, session_id, context, user_context):
+    async def handle_message(
+        self, *, message, session_id, context, user_context, confirmation=None
+    ):
         yield {"type": "status", "message": "thinking..."}
         yield {"type": "content", "text": "hi"}
         yield {

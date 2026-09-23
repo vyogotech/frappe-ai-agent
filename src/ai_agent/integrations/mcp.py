@@ -26,20 +26,28 @@ DEPRECATED_TOOLS = frozenset(
 )
 
 
-def build_mcp_client_for_sid(settings: Settings, sid: str) -> MultiServerMCPClient:
+def build_mcp_client_for_sid(
+    settings: Settings, sid: str, confirmation_token: str | None = None
+) -> MultiServerMCPClient:
     """A new client per call, forwarding `sid`: shared, it would carry one user's sid to another.
+
+    `confirmation_token` is the one-time grant the MCP server redeems before a write. It travels
+    as a header, so it is in no tool argument, no saved row and nothing the model ever reads.
 
     Raises:
         ValueError: `sid` is empty or whitespace-only.
     """
     if not sid or not sid.strip():
         raise ValueError("build_mcp_client_for_sid requires a non-empty sid")
+    headers = {"Cookie": f"sid={sid}"}
+    if confirmation_token:
+        headers["X-Frappe-Confirmation"] = confirmation_token
     return MultiServerMCPClient(
         {
             "frappe": {
                 "url": settings.mcp_server_url,
                 "transport": "streamable_http",
-                "headers": {"Cookie": f"sid={sid}"},
+                "headers": headers,
                 "timeout": timedelta(seconds=settings.mcp_tool_timeout_s),
                 # what a stalled tool call waits on; the adapter's own default is 5 minutes
                 "sse_read_timeout": timedelta(seconds=settings.mcp_tool_timeout_s),

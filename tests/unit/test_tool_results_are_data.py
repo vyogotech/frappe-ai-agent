@@ -22,6 +22,10 @@ class _Registry(ToolRegistry):
     def names(self) -> set[str]:
         return {"get_document"}
 
+    def writes(self, name: str) -> bool:
+        # scripted as reads: the pause a write needs has its own tests
+        return False
+
     async def ainvoke(self, name: str, args: dict[str, Any] | None) -> str:
         return POISON
 

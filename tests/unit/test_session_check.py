@@ -17,7 +17,9 @@ class _Answers:
     def __init__(self) -> None:
         self.asked = 0
 
-    async def handle_message(self, *, message, session_id, context, user_context):
+    async def handle_message(
+        self, *, message, session_id, context, user_context, confirmation=None
+    ):
         self.asked += 1
         yield {"type": "content", "text": "hi"}
         yield {"type": "done", "tools_called": [], "data_quality": "high", "timestamp": "t"}

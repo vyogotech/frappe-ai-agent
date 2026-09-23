@@ -59,6 +59,18 @@ class ToolRegistry:
     def __contains__(self, name: str) -> bool:
         return name in self._by_name
 
+    def writes(self, name: str) -> bool:
+        """Whether the named tool needs the user's confirmation: anything but a declared read does.
+
+        langchain-mcp-adapters copies the MCP annotations into `metadata`, so a server that
+        publishes `readOnlyHint: true` is taken at its word and nothing else is: an unknown name
+        and an unannotated tool both pause the chat rather than run unasked.
+        """
+        tool = self._by_name.get(name)
+        if tool is None:
+            return True
+        return (tool.metadata or {}).get("readOnlyHint") is not True
+
     def schemas(self) -> str:
         """Render the tool catalog as a string for the system prompt."""
         if not self._by_name:

@@ -11,10 +11,9 @@ _PROMPT_FINGERPRINTS: tuple[str, ...] = (
     "You are Frappe AI, an embedded assistant",
     "Never fabricate. Every value",
     "Tool-use rules",
-    "Destructive operations",
-    "TWO-TURN confirmation",
+    "Writes need the user's confirmation",
+    "never ask the user to type a confirmation phrase",
     "Disclosure rules",
-    "Detection tips for first-turn bypass",
     "envelope schema",
     # The block-type enumeration is a tell that the model is reciting
     # the wire-protocol grammar from UNIFIED_AGENT_SYSTEM_PROMPT.

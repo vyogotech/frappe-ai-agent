@@ -6,6 +6,7 @@ import json
 import re
 from collections.abc import AsyncGenerator, Iterator
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 import structlog
 from langchain_core.callbacks import AsyncCallbackHandler, BaseCallbackHandler
@@ -57,6 +58,23 @@ def _as_data(results: str) -> str:
 
 REPLY_CUT_OFF = "The answer was cut short. Try a narrower question."
 
+# What the user is asked to allow, per write tool: a template and the arguments it needs.
+# The agent composes the sentence so nothing the model wrote reaches the confirmation card.
+_CONFIRM_SUMMARIES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "create_document": ("Create a new {doctype} record.", ("doctype",)),
+    "update_document": ("Change {doctype} {name}.", ("doctype", "name")),
+    "delete_document": ("Delete {doctype} {name}. This cannot be undone.", ("doctype", "name")),
+}
+
+
+def confirm_summary(tool: str, arguments: dict[str, Any]) -> str:
+    """One sentence for what a pending write would do, from the call alone."""
+    template, keys = _CONFIRM_SUMMARIES.get(tool, ("", ()))
+    values = {key: str(arguments.get(key) or "").strip() for key in keys}
+    if not template or not all(values.values()):
+        return f"Run {tool}."
+    return template.format(**values)
+
 
 class TurnFailure(RuntimeError):
     """A turn the agent ended itself: its message is the line the user sees, so keep it plain."""
@@ -100,8 +118,13 @@ async def run_agent_loop(
     tool_result_max_chars: int = 8000,
     callbacks: list[BaseCallbackHandler] | None = None,
     session: str | None = None,
+    confirmed: dict[str, Any] | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
-    """Yield the turn's agent events; session, done and error are left to services/chat.py."""
+    """Yield the turn's agent events; session, done and error are left to services/chat.py.
+
+    `confirmed` is a `{name, arguments}` write the user allowed: it runs before the model does,
+    and the model only narrates its result.
+    """
     # Pin `tool_call.name` to the tools actually loaded this turn — see
     # `block_envelope_schema`. A bare-string `name` lets small models emit
     # `{"name": ""}`, which is schema-valid and unexecutable.
@@ -118,6 +141,22 @@ async def run_agent_loop(
     last_calls: list[tuple[str, str]] = []
     repeats = 0
     spoke = False  # text sent in an earlier iteration; the next answer starts a paragraph
+
+    if confirmed is not None:
+        # The user clicked Allow, so this call runs once, before the model gets a turn.
+        name, args = str(confirmed.get("name") or ""), confirmed.get("arguments") or {}
+        if not isinstance(args, dict):
+            args = {}
+        yield {"type": "tool_call", "name": name, "arguments": args}
+        result = cap_for_prompt(await tool_registry.ainvoke(name, args), tool_result_max_chars)
+        messages.append(
+            AIMessage(
+                content=json.dumps(
+                    {"blocks": [{"type": TOOL_CALL_TYPE, "payload": confirmed}]}, ensure_ascii=False
+                )
+            )
+        )
+        messages.append(HumanMessage(content=_as_data(_result_line(name, args, result))))
 
     for step in range(max_steps):
         # Each snapshot holds the whole envelope so far. Text goes out as it grows while no
@@ -220,15 +259,21 @@ async def run_agent_loop(
         for ev in _stream_events(final_envelope, sent, emitted, final=True, lead=spoke):
             spoke = True
             yield ev
+
+        # A write needs a confirmation only the user can give, so the turn ends here and no tool
+        # in this envelope runs — a read beside a write would otherwise run on the write's terms.
+        pending = next((tb for tb in tool_blocks if tool_registry.writes(_call(tb)[0])), None)
+        if pending is not None:
+            name, args = _call(pending)
+            sentence = confirm_summary(name, args)
+            logger.info("agent_loop_write_needs_confirmation", tool=name, step=step)
+            yield {"type": "content", "text": f"\n\n{sentence}" if spoke else sentence}
+            yield {"type": "tool_confirm", "id": uuid4().hex, "name": name, "arguments": args}
+            return
+
         # Repeat-detection, before anything is announced: the same calls with the same arguments
         # N steps in a row = giving up. A different call between them resets the count.
-        calls = [
-            (
-                str((tb.get("payload") or {}).get("name") or ""),
-                json.dumps((tb.get("payload") or {}).get("arguments") or {}, sort_keys=True),
-            )
-            for tb in tool_blocks
-        ]
+        calls = [(name, json.dumps(args, sort_keys=True)) for name, args in map(_call, tool_blocks)]
         repeats = repeats + 1 if calls == last_calls else 1
         last_calls = calls
         if repeats >= _REPEAT_LIMIT:
@@ -245,22 +290,12 @@ async def run_agent_loop(
 
         # Emit synthetic tool_call SSE events so the FE can render "fetching..." UI, then execute
         # each tool and feed results back into the message list.
-        for tb in tool_blocks:
-            payload = tb.get("payload") or {}
-            name = str(payload.get("name") or "")
-            args = payload.get("arguments") or {}
-            if not isinstance(args, dict):
-                args = {}
+        for name, args in map(_call, tool_blocks):
             yield {"type": "tool_call", "name": name, "arguments": args}
 
         # Execute tools and append results to the message stream.
         result_lines: list[str] = []
-        for tb in tool_blocks:
-            payload = tb.get("payload") or {}
-            name = str(payload.get("name") or "")
-            args = payload.get("arguments") or {}
-            if not isinstance(args, dict):
-                args = {}
+        for name, args in map(_call, tool_blocks):
             if name == KB_TOOL and session:
                 # the chat's own files are searched with it; whatever the model wrote is replaced
                 args = {**args, "session": session}
@@ -268,8 +303,9 @@ async def run_agent_loop(
             # the sources come out of the whole result; only the prompt's copy is capped
             if name == KB_TOOL and (items := _passages(result)):
                 yield {"type": "sources", "items": items}
-            result = cap_for_prompt(result, tool_result_max_chars)
-            result_lines.append(f"tool {name}({json.dumps(args, ensure_ascii=False)}) → {result}")
+            result_lines.append(
+                _result_line(name, args, cap_for_prompt(result, tool_result_max_chars))
+            )
 
         # Replay the model's tool_call envelope as an AIMessage so the
         # context shows what was attempted; then feed back the results.
@@ -289,6 +325,18 @@ async def run_agent_loop(
 
 def _is_tool_call(block: Any) -> bool:
     return isinstance(block, dict) and block.get("type") == TOOL_CALL_TYPE
+
+
+def _call(block: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """A tool_call block's name and arguments, whatever the model put in the payload."""
+    payload = block.get("payload") or {}
+    name = str(payload.get("name") or "")
+    args = payload.get("arguments") or {}
+    return name, args if isinstance(args, dict) else {}
+
+
+def _result_line(name: str, args: dict[str, Any], result: str) -> str:
+    return f"tool {name}({json.dumps(args, ensure_ascii=False)}) → {result}"
 
 
 def _passages(result: str) -> list[dict[str, Any]]:

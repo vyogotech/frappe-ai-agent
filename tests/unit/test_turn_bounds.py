@@ -89,6 +89,10 @@ class _FakeRegistry(ToolRegistry):
     def schemas(self) -> str:
         return "- get_document: one document"
 
+    def writes(self, name: str) -> bool:
+        # scripted as reads: the pause a write needs has its own tests
+        return False
+
     async def ainvoke(self, name: str, args: dict[str, Any] | None) -> str:
         return self._result
 

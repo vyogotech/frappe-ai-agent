@@ -46,6 +46,10 @@ TOOLS_TIMED_OUT = "The assistant's tools timed out. Try again."
 ANSWER_FAILED = "The answer could not be completed. Try again."
 ANSWER_STOPPED = "The answer was stopped. Ask again for a full answer."
 
+# The confirmed turn's question, written here rather than by the model: the user clicked a button,
+# so there is no message of theirs to replay and nothing of the model's may stand in for one.
+CONFIRMED_TURN = "The user allowed this action and it has run. Tell them the result."
+
 # The turn is already over when a stopped answer is written, so that save gets its own budget.
 _STOPPED_SAVE_TIMEOUT_S = 5
 
@@ -181,12 +185,18 @@ class ChatService:
     async def handle_message(
         self,
         *,
-        message: str,
+        message: str | None = None,
         session_id: str | None,
         context: dict[str, Any],
         user_context: UserContext,
+        confirmation: dict[str, Any] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        """Yield one turn's SSE events; an AsyncGenerator, so aclose() can stop it on disconnect."""
+        """Yield one turn's SSE events; an AsyncGenerator, so aclose() can stop it on disconnect.
+
+        `confirmation` is a `{tool, arguments, token}` write the user allowed: that turn asks no
+        question of its own, saves no user row, and runs the stored call before the model speaks.
+        """
+        user_message = CONFIRMED_TURN if confirmation else (message or "")
         tools_called: list[str] = []
         tool_invocations: list[dict[str, Any]] = []
         # Final user-visible content (text blocks from the agent loop's
@@ -255,7 +265,7 @@ class ChatService:
             if session_id is None:
                 created = await self._history.create_session(
                     sid=user_context.sid,
-                    title=_derive_title(message),
+                    title=_derive_title(user_message),
                     context_json=json.dumps(context or {}),
                 )
                 if created is None:
@@ -271,7 +281,7 @@ class ChatService:
                 await self._history.ensure_session(
                     sid=user_context.sid,
                     name=session_id,
-                    title=_derive_title(message),
+                    title=_derive_title(user_message),
                     context_json=json.dumps(context or {}),
                 )
 
@@ -308,25 +318,31 @@ class ChatService:
                         history_messages.append(AIMessage(content=content))
 
             # Persist the user's message. Best-effort: a Frappe outage must
-            # not abort the chat turn — log and continue.
-            try:
-                await self._history.save_message(
-                    sid=user_context.sid,
-                    session=session_id,
-                    role="user",
-                    content=message,
-                )
-            except Exception as exc:  # noqa: BLE001 - a history write never aborts the answer
-                logger.warning(
-                    "chat_history_user_message_write_failed",
-                    session_id=session_id,
-                    error_type=type(exc).__name__,
-                    error=str(exc)[:200],
-                )
+            # not abort the chat turn — log and continue. A confirmed turn has no message of the
+            # user's, and saving the agent's stand-in line would replay it as one next turn.
+            if confirmation is None:
+                try:
+                    await self._history.save_message(
+                        sid=user_context.sid,
+                        session=session_id,
+                        role="user",
+                        content=user_message,
+                    )
+                except Exception as exc:  # noqa: BLE001 - a history write never aborts the answer
+                    logger.warning(
+                        "chat_history_user_message_write_failed",
+                        session_id=session_id,
+                        error_type=type(exc).__name__,
+                        error=str(exc)[:200],
+                    )
 
             try:
                 # Per-request MCP client carrying the caller's sid cookie.
-                mcp_client = build_mcp_client_for_sid(self._settings, user_context.sid)
+                mcp_client = build_mcp_client_for_sid(
+                    self._settings,
+                    user_context.sid,
+                    confirmation["token"] if confirmation else None,
+                )
                 tools: list[Any] = []
                 tools_unavailable_reason: str | None = None
                 tools_load_timeout_s = self._settings.mcp_tools_load_timeout_s
@@ -405,13 +421,21 @@ class ChatService:
                         run_agent_loop(
                             llm=self._llm,
                             tool_registry=tool_registry,
-                            user_message=message,
+                            user_message=user_message,
                             context_preamble=context_preamble,
                             history=history_messages or None,
                             max_steps=max_steps,
                             tool_result_max_chars=self._settings.agent_prompt_text_max_chars,
                             callbacks=[decode],
                             session=session_id,
+                            confirmed=(
+                                {
+                                    "name": confirmation["tool"],
+                                    "arguments": confirmation.get("arguments") or {},
+                                }
+                                if confirmation
+                                else None
+                            ),
                         ),
                     ):
                         if leak_triggered:

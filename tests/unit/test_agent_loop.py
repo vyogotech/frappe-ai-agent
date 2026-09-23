@@ -27,6 +27,10 @@ class _FakeRegistry(ToolRegistry):
     def schemas(self) -> str:
         return "(no tools)"
 
+    def writes(self, name: str) -> bool:
+        # scripted reads: the pause a write needs has its own tests
+        return False
+
     def names(self) -> set[str]:
         return set(self._results)
 

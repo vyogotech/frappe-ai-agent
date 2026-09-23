@@ -167,6 +167,37 @@
       ],
       "title": "ToolCallEvent",
       "type": "object"
+    },
+    "ToolConfirmEvent": {
+      "description": "A write the user has to allow; the turn ends on it and the tool has not run.",
+      "properties": {
+        "arguments": {
+          "additionalProperties": true,
+          "title": "Arguments",
+          "type": "object"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "type": {
+          "const": "tool_confirm",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "name",
+        "arguments"
+      ],
+      "title": "ToolConfirmEvent",
+      "type": "object"
     }
   },
   "anyOf": [
@@ -175,6 +206,9 @@
     },
     {
       "$ref": "#/$defs/ToolCallEvent"
+    },
+    {
+      "$ref": "#/$defs/ToolConfirmEvent"
     },
     {
       "$ref": "#/$defs/SourcesEvent"

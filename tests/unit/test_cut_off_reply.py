@@ -79,6 +79,10 @@ class _RecordingRegistry(ToolRegistry):
     def schemas(self) -> str:
         return "- delete_document: delete one document"
 
+    def writes(self, name: str) -> bool:
+        # scripted as reads: the pause a write needs has its own tests
+        return False
+
     async def ainvoke(self, name: str, args: dict[str, Any] | None) -> str:
         self.calls.append((name, args or {}))
         return "deleted"
