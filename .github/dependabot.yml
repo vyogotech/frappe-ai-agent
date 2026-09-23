@@ -1,0 +1,24 @@
+version: 2
+updates:
+  # the `uses:` pins in ci.yml, the Dockerfile's two digests and uv.lock do not move on their own.
+  # Nothing here reads the integration job's OLLAMA_IMAGE, MCP_REF or frappe-bench pin: those are by hand.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      python:
+        patterns: ["*"]
