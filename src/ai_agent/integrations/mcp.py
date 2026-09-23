@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from ai_agent.config import Settings
+from ai_agent.observability import request_id as correlation
 
 if TYPE_CHECKING:
     from langchain_core.tools import BaseTool
@@ -37,6 +38,8 @@ def build_mcp_client_for_sid(
     if not sid or not sid.strip():
         raise ValueError("build_mcp_client_for_sid requires a non-empty sid")
     headers = {"Cookie": f"sid={sid}"}
+    if request_id := correlation.current():
+        headers["X-Request-ID"] = request_id
     if confirmation_token:
         headers["X-Frappe-Confirmation"] = confirmation_token
     return MultiServerMCPClient(

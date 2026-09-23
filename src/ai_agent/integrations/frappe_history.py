@@ -12,6 +12,8 @@ import httpx
 import structlog
 from opentelemetry import metrics, trace
 
+from ai_agent.observability import request_id as correlation
+
 logger = structlog.get_logger(__name__)
 _tracer = trace.get_tracer(__name__)
 
@@ -50,6 +52,11 @@ def _with_blocks(text: str, tool_result_json: Any) -> str:
     shown = json.dumps({"blocks": blocks}, separators=(",", ":"), ensure_ascii=False)
     shown = shown[:_BLOCKS_CHARS]
     return f"{text}\n\n{shown}" if text else shown
+
+
+def _headers(sid: str) -> dict[str, str]:
+    """Who the call is for, and which answer it belongs to (ADR-008)."""
+    return {"Cookie": f"sid={sid}", **correlation.frappe_header()}
 
 
 class FrappeHistoryClient:
@@ -165,7 +172,7 @@ class FrappeHistoryClient:
         }
         try:
             client = self._get_client()
-            resp = await client.get(url, params=params, headers={"Cookie": f"sid={sid}"})
+            resp = await client.get(url, params=params, headers=_headers(sid))
             if resp.status_code != 200:
                 logger.warning(
                     "chat_history_list_failed",
@@ -207,15 +214,13 @@ class FrappeHistoryClient:
         try:
             # httpx rebuilds a redirect's cookies from the jar, which keeps none, so each hop
             # (Frappe 16 sends /app on to /desk) is followed here with the sid
-            response = await client.get(
-                url, headers={"Cookie": f"sid={sid}"}, follow_redirects=False
-            )
+            response = await client.get(url, headers=_headers(sid), follow_redirects=False)
             for _ in range(4):  # five requests in all
                 if response.next_request is None:
                     break
                 response = await client.get(
                     str(response.next_request.url),
-                    headers={"Cookie": f"sid={sid}"},
+                    headers=_headers(sid),
                     follow_redirects=False,
                 )
             response.raise_for_status()
@@ -275,7 +280,7 @@ class FrappeHistoryClient:
 
             try:
                 csrf_token = await self._csrf_token_for(sid)
-                headers: dict[str, str] = {"Cookie": f"sid={sid}"}
+                headers = _headers(sid)
                 if csrf_token:
                     headers[_CSRF_HEADER] = csrf_token
                 response = await client.post(url, json=payload, headers=headers)

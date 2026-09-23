@@ -9,6 +9,8 @@ import httpx
 from fastapi import HTTPException
 from starlette.requests import Request
 
+from ai_agent.observability import request_id as correlation
+
 
 @dataclass(frozen=True, slots=True)
 class UserContext:
@@ -38,7 +40,11 @@ async def signed_in_user(frappe_url: str, sid: str) -> str | None:
     async with httpx.AsyncClient(timeout=5.0) as client:
         response = await client.get(
             f"{frappe_url}/api/method/frappe.auth.get_logged_user",
-            headers={"Cookie": f"sid={sid}", "Accept": "application/json"},
+            headers={
+                "Cookie": f"sid={sid}",
+                "Accept": "application/json",
+                **correlation.frappe_header(),
+            },
         )
     if response.status_code in (401, 403):
         return None
