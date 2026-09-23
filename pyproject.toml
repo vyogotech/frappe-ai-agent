@@ -19,7 +19,6 @@ dependencies = [
     "starlette>=0.46",
     "langchain>=0.3",
     "langchain-core>=1",
-    "langchain-openai>=0.3",
     "langchain-ollama>=0.3",
     "langchain-mcp-adapters>=0.1",
     "structlog>=24.1",
@@ -33,6 +32,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+openai = ["langchain-openai>=0.3"]
 anthropic = ["langchain-anthropic>=0.3"]
 google = ["langchain-google-genai>=2.0"]
 

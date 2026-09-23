@@ -192,7 +192,7 @@ truncating its own context.
 The factory in `src/ai_agent/integrations/llm.py` instantiates a chat model from settings:
 
 - **Ollama** — direct `ChatOllama` (so `num_ctx` and `num_predict` are wired correctly).
-- **OpenAI / Anthropic / Google** — via LangChain's universal `init_chat_model`. Install the optional extras (`anthropic`, `google`) if you need those.
+- **OpenAI / Anthropic / Google** — via LangChain's universal `init_chat_model`. Each provider's SDK is an optional extra (`openai`, `anthropic`, `google`): install the one you use, or `uv sync --all-extras` for all three. The Docker image is built without extras, so it carries Ollama only; a hosted provider needs an image built with its extra, and without it startup fails with LangChain's own `Initializing Chat… requires the langchain-… package` error.
 
 The default config targets a local Ollama running `qwen3.5:9b`. The system prompt and the parser are designed to tolerate the kinds of mistakes small models make (chart-type aliases, occasional tool-call formatting drift, etc.), but any tool-capable model will work.
 

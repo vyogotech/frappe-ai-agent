@@ -6,12 +6,14 @@ WORKDIR /app
 ENV UV_LINK_MODE=copy
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install uv
-COPY pyproject.toml .
+COPY pyproject.toml uv.lock ./
+# --locked: install the committed resolution, and fail the build if pyproject.toml has moved
+# away from it. Without the lock the builder resolves fresh versions on every build.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-dev --no-install-project
+    uv sync --locked --no-dev --no-install-project
 COPY src/ src/
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-dev --no-editable
+    uv sync --locked --no-dev --no-editable
 
 # Stage 2: Runtime
 FROM python:3.12-slim
