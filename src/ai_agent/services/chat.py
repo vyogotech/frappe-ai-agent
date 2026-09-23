@@ -75,6 +75,13 @@ async def _until(
         yield event
 
 
+def _root_cause(exc: BaseException) -> BaseException:
+    """The first concrete exception under any ExceptionGroup, as anyio's TaskGroup raises."""
+    while isinstance(exc, BaseExceptionGroup) and exc.exceptions:
+        exc = exc.exceptions[0]
+    return exc
+
+
 def _tools_unavailable_message(root: BaseException) -> str:
     """Map a tool-load root cause to the tool-status note put in the model's prompt."""
     if isinstance(root, httpx.HTTPStatusError):
@@ -209,7 +216,8 @@ class ChatService:
         sources_seen: list[dict[str, Any]] = []
         blocks_seen: list[dict[str, Any]] = []
         decode = _DecodeUsage()
-        started = time.monotonic()
+        # One clock for the turn: perf_counter, not time(), so a system-clock jump cannot move it.
+        t0 = time.perf_counter()
         # The whole turn's budget, so the history read and the tool load spend it too.
         deadline = asyncio.get_running_loop().time() + self._settings.agent_turn_timeout_s
         first_token: float | None = None  # seconds until the first answer text went out
@@ -221,10 +229,6 @@ class ChatService:
         degraded = False
         error_message = ""
         error_type: str | None = None
-        # Wall-clock timer for the turn-summary log. perf_counter is
-        # monotonic and the right primitive for a duration measurement
-        # (immune to system clock jumps).
-        t0 = time.perf_counter()
 
         async def save_answer(content: str, session: str) -> None:
             """Write the assistant row; best-effort, so a history outage never ends the turn."""
@@ -363,9 +367,7 @@ class ChatService:
                         )
                         raise TurnFailure(TOOLS_TIMED_OUT) from exc
                     except Exception as exc:  # noqa: BLE001 - without tools the model still answers
-                        root: BaseException = exc
-                        while isinstance(root, BaseExceptionGroup) and root.exceptions:
-                            root = root.exceptions[0]
+                        root = _root_cause(exc)
                         tools_unavailable_reason = _tools_unavailable_message(root)
                         logger.warning(
                             "chat_tools_load_failed_soft_degrade",
@@ -466,7 +468,7 @@ class ChatService:
                                 continue
                             assistant_text_parts.append(ev["text"])
                             if first_token is None:
-                                first_token = round(time.monotonic() - started, 3)
+                                first_token = round(time.perf_counter() - t0, 3)
                         yield ev
 
                     # a tool the turn asked for and did not get: the answer is not fully backed
@@ -485,10 +487,7 @@ class ChatService:
             except Exception as exc:
                 failed = True
                 error_type = type(exc).__name__
-                # Unwrap TaskGroup's ExceptionGroup, or the user sees its opaque outer message.
-                display_exc: BaseException = exc
-                while isinstance(display_exc, BaseExceptionGroup) and display_exc.exceptions:
-                    display_exc = display_exc.exceptions[0]
+                display_exc = _root_cause(exc)
                 logger.exception(
                     "chat_handle_message_failed",
                     session_id=session_id,
