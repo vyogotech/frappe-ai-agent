@@ -16,14 +16,16 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
+    "starlette>=0.46",
     "langchain>=0.3",
+    "langchain-core>=1",
     "langchain-openai>=0.3",
     "langchain-ollama>=0.3",
     "langchain-mcp-adapters>=0.1",
     "structlog>=24.1",
     "opentelemetry-api>=1.27",
     "opentelemetry-sdk>=1.27",
-    "opentelemetry-exporter-otlp>=1.27",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.27",
     "opentelemetry-instrumentation-fastapi>=0.48",
     "httpx>=0.27",
     "slowapi>=0.1.9",
@@ -33,6 +35,8 @@ dependencies = [
 [project.optional-dependencies]
 anthropic = ["langchain-anthropic>=0.3"]
 google = ["langchain-google-genai>=2.0"]
+
+[dependency-groups]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
@@ -73,3 +77,16 @@ filterwarnings = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ai_agent"]
+
+[tool.deptry.package_module_name_map]
+# The four OTEL distributions share one `opentelemetry` namespace package, which deptry
+# cannot map back to a distribution name on its own.
+opentelemetry-api = ["opentelemetry"]
+opentelemetry-sdk = ["opentelemetry"]
+opentelemetry-exporter-otlp-proto-grpc = ["opentelemetry"]
+opentelemetry-instrumentation-fastapi = ["opentelemetry"]
+
+[tool.deptry.per_rule_ignores]
+# uvicorn is run as a command (Dockerfile, Makefile); the provider SDKs are loaded by name
+# through langchain's init_chat_model (integrations/llm.py). Neither is imported here.
+DEP002 = ["uvicorn", "langchain-openai", "langchain-anthropic", "langchain-google-genai"]
