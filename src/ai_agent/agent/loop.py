@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
     from ai_agent.agent.tool_registry import ToolRegistry
 
+from ai_agent.agent.tool_registry import AGENT_ARGS
 from ai_agent.blocks.envelope import (
     TOOL_CALL_TYPE,
     block_envelope_schema,
@@ -292,9 +293,11 @@ async def run_agent_loop(
         # Execute tools and append results to the message stream.
         result_lines: list[str] = []
         for name, args in map(_call, tool_blocks):
+            # what the agent fills, the model never does — dropped even when this turn has no
+            # session to put back, or an unpinned search runs against the chat the model named
+            args = {k: v for k, v in args.items() if k not in AGENT_ARGS.get(name, ())}
             if name == KB_TOOL and session:
-                # the chat's own files are searched with it; whatever the model wrote is replaced
-                args = {**args, "session": session}
+                args["session"] = session
             result = await tool_registry.ainvoke(name, args)
             # the sources come out of the whole result; only the prompt's copy is capped
             if name == KB_TOOL and (items := _passages(result)):
