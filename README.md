@@ -46,7 +46,7 @@ Per chat request, `ChatService.handle_message` does the following:
 2. Persist the user message to `AI Chat Message`.
 3. Build a fresh MCP client carrying the caller's `sid` and load its tools (timeout configurable via `mcp_tools_load_timeout_s`, default 20 s).
 4. Register each tool in `ToolRegistry`, which surfaces exceptions to the LLM as observations rather than aborting the loop.
-5. Build a per-request system prompt with page context and currency.
+5. Build a per-request system prompt with the page context, and the currency if the caller named one.
 6. Run `run_agent_loop`: structured-output envelope → execute any `tool_call` blocks → re-prompt with results → repeat until the envelope contains terminal blocks. Translate each block into the matching SSE event.
 7. Persist the final assistant message (success or error).
 
@@ -86,7 +86,7 @@ Streaming chat endpoint. Returns `text/event-stream`.
 
 - `message` — required, 1–32 000 chars, non-whitespace.
 - `session_id` — optional. Omit on the first turn; the agent creates a session and announces its id in the first SSE frame. Pass that id back on subsequent turns to continue the conversation.
-- `context` — optional page context. Recognised keys: `doctype`, `docname`, `route`, `currency` (ISO 4217 code; default `INR`). Everything else is ignored.
+- `context` — optional page context. Recognised keys: `doctype`, `docname`, `route`, `currency` (three ASCII letters, the shape of an ISO 4217 alpha-3 code; anything else and the answer names no currency). Everything else is ignored.
 
 **Authentication** — must include a Frappe `sid` cookie. Missing or empty cookie → `401`.
 

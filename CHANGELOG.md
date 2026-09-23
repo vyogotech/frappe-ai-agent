@@ -109,6 +109,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   the cache no longer grows without end.
 - The parser's chart-alias storage is a `frozenset` rather than a dictionary that mapped every
   key to the same value.
+- **A currency is never guessed.** The prompt names one only when `context.currency` is three
+  ASCII letters, the shape of an ISO 4217 alpha-3 code, and names it by that code; with none,
+  the prompt carries no currency line and no symbol rule. The ten-entry symbol table and the
+  Indian-rupee default are gone.
 
 ### Fixed
 

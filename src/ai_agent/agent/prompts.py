@@ -7,8 +7,7 @@ You are Frappe AI, an embedded assistant in an ERPNext deployment. You answer
 questions about the user's data by calling MCP tools and composing a response
 from the actual tool output.
 
-Page: {page_context}
-Currency: {currency_symbol} ({currency})
+Page: {page_context}{currency_line}
 
 # Tool-use rules
 
@@ -23,7 +22,6 @@ Currency: {currency_symbol} ({currency})
   fields and don't pretend it succeeded.
 - If a tool returns no data, say "no records found" — don't invent rows.
 - Prefer aggregate_documents over fetching a list and summing yourself.
-- Use {currency_symbol} for monetary values in prose.
 
 # Writes need the user's confirmation
 
@@ -74,24 +72,10 @@ transaction_date, due_date), pick the one that matches the user's intent
 """
 
 
-_CURRENCY_SYMBOLS: dict[str, str] = {
-    "INR": "₹",
-    "USD": "$",
-    "EUR": "€",
-    "GBP": "£",
-    "JPY": "¥",
-    "AUD": "A$",
-    "CAD": "C$",
-    "CNY": "¥",
-    "AED": "AED ",
-    "SGD": "S$",
-}
-
-
 def build_system_prompt(context: dict) -> str:
-    """The context preamble; currency defaults to INR, as the frontend's formatValue() does."""
+    """The context preamble; a currency reaches it only when the caller named one."""
     page_context = "ERPNext (no specific page)"
-    currency = "INR"
+    currency_line = ""
     if context:
         route = context.get("route", "")
         doctype = context.get("doctype")
@@ -100,11 +84,9 @@ def build_system_prompt(context: dict) -> str:
             page_context = f"{doctype}: {docname} (route: {route})"
         elif route:
             page_context = f"Route: {route}"
-        if isinstance(context.get("currency"), str) and context["currency"]:
-            currency = context["currency"].upper()
-    currency_symbol = _CURRENCY_SYMBOLS.get(currency, currency + " ")
-    return SYSTEM_PROMPT.format(
-        page_context=page_context,
-        currency=currency,
-        currency_symbol=currency_symbol,
-    )
+        code = context.get("currency", "")
+        # never default: a guessed currency in a financial answer is worse than none, and
+        # anything but the shape of an ISO 4217 code is caller text going into the prompt
+        if isinstance(code, str) and len(code) == 3 and code.isascii() and code.isalpha():
+            currency_line = f"\nCurrency: {code.upper()}"
+    return SYSTEM_PROMPT.format(page_context=page_context, currency_line=currency_line)
