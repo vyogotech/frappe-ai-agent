@@ -259,6 +259,8 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
+    # without this the push runs beside the checks, so `latest` ships whatever they report
+    needs: [lint, typecheck, test, integration, security]
     permissions:
       contents: read
       packages: write
