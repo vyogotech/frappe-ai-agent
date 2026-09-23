@@ -199,7 +199,6 @@ jobs:
             host: "0.0.0.0"
             port: 8080
             timeout: "30s"
-            max_connections: 100
           erpnext:
             base_url: "http://localhost:8000"
             api_key: "dummy"
@@ -214,7 +213,6 @@ jobs:
               validate_remote: false
           logging:
             level: "info"
-            format: "json"
           YAML
 
       - name: Start frappe-mcp-server (background)
