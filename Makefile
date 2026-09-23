@@ -3,7 +3,7 @@
 install:
 	uv sync --all-extras
 
-# one spelling per check: ci.yml calls these targets, it does not repeat the commands
+# ci.yml calls these targets; spelling a command out there again is how the two drifted apart
 test:
 	uv run pytest tests/unit/ -v --cov=ai_agent --cov-report=xml
 

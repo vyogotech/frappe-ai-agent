@@ -74,7 +74,7 @@ jobs:
       MCP_REPO: vyogotech/frappe-mcp-server
       MCP_REF: 5c8fa163acf157ffb738b7d4a6923f3c3ddf6c1f
       FRAPPE_AI_REPO: vyogotech/frappe_ai
-      # a branch because apps.json is too; ragbot ships audit/production-readiness until it merges
+      # a branch because apps.json is too; keep it equal to the branch apps.json installs
       FRAPPE_AI_REF: main
     services:
       mariadb:

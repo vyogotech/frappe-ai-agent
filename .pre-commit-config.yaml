@@ -1,6 +1,7 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.9
+    # keep equal to the ruff in uv.lock: two versions disagree and CI fails where `make lint` passed
+    rev: v0.16.8
     hooks:
       - id: ruff
         args: [--fix]
