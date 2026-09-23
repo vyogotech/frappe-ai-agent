@@ -64,6 +64,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- **`GET /config` takes the caller's `sid`**, the same cookie `POST /api/v1/chat` requires. It
+  names the model and both peer URLs, and it answered anyone. `GET /health` stays open as the
+  liveness route. A caller of `/config` must now send the cookie.
 - **LangGraph is gone from the chat path.** One JSON envelope per turn
   (`{"blocks": [{"type": …, "payload": …}]}`), enforced at the token level by the provider's own
   structured output, and one hand-written loop that runs the tool-call blocks. This is what makes

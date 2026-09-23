@@ -124,6 +124,8 @@ Lightweight liveness check: `{"status": "ok"}`.
 
 Returns the resolved LLM provider, model, base URL, Ollama context window (`llm_num_ctx`) and MCP server URL. Useful for the frontend to render a "connected to: …" indicator.
 
+**Authentication** — the same Frappe `sid` cookie `POST /api/v1/chat` requires; missing, empty or not signed in → `401`. The route names the model and both peer URLs, so a caller that may not ask a question may not read it either. `GET /health` is the unauthenticated liveness route.
+
 ## Content blocks
 
 The LLM wraps structured data in `<ai-block type="...">{ JSON }</ai-block>` tags. The block JSON is validated against a Pydantic model, capped at sane size limits, and streamed to the frontend as a single `content_block` event.
