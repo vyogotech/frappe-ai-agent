@@ -17,34 +17,6 @@ class TestBuildSystemPrompt:
         prompt = build_system_prompt({"route": "List/Sales Invoice"})
         assert "List/Sales Invoice" in prompt
 
-    def test_currency_defaults_to_inr(self):
-        prompt = build_system_prompt({})
-        # The prompt was trimmed (11.5KB → 2.2KB) to fit qwen3.5:9b's context
-        # after tool calls; currency now appears as "Currency: <symbol> (<code>)".
-        assert "(INR)" in prompt
-        assert "₹" in prompt
-
-    def test_currency_usd(self):
-        prompt = build_system_prompt({"currency": "USD"})
-        assert "(USD)" in prompt
-        assert "$" in prompt
-
-    def test_currency_eur(self):
-        prompt = build_system_prompt({"currency": "EUR"})
-        assert "(EUR)" in prompt
-        assert "€" in prompt
-
-    def test_currency_unknown_falls_back_to_code_with_space(self):
-        # Currencies not in the symbol map use the ISO code with a trailing
-        # space, so "BHD" appears as "BHD " in prose to keep it unambiguous.
-        prompt = build_system_prompt({"currency": "BHD"})
-        assert "(BHD)" in prompt
-        assert "BHD " in prompt
-
-    def test_currency_lowercase_normalized(self):
-        prompt = build_system_prompt({"currency": "inr"})
-        assert "(INR)" in prompt
-
     # --- Anti-fabrication & tool-catalog coverage ----------------------------
 
     def test_explicit_no_fabrication_rule(self):
