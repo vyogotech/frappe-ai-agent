@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from contextlib import asynccontextmanager
+from importlib.metadata import version
 
 import structlog
 from fastapi import FastAPI, Request
@@ -70,7 +71,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="Frappe AI Agent",
-        version="0.1.0",
+        version=version("frappe-ai-agent"),
         lifespan=lifespan,
         openapi_url=None,
     )
