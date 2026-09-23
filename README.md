@@ -154,7 +154,7 @@ All settings are loaded from environment or `.env` with the `AI_AGENT_` prefix. 
 | `AI_AGENT_MCP_SERVER_URL` | `http://localhost:8080/mcp` | MCP Streamable HTTP endpoint |
 | `AI_AGENT_MCP_TOOLS_LOAD_TIMEOUT_S` | `20.0` | Per-request bound on `tools/list`. A timeout becomes a single SSE `error` event, not a hung stream |
 | `AI_AGENT_MCP_TOOL_TIMEOUT_S` | `30.0` | Bound on one tool call, and on the HTTP and SSE read timeouts of the MCP session under it. A timeout comes back as a tool result the model can answer around |
-| `AI_AGENT_HEALTH_PROBE_TIMEOUT_S` | `5.0` | Timeout on the agent's own `/health` reachability pings against MCP and Ollama |
+| `AI_AGENT_HEALTH_PROBE_TIMEOUT_S` | `2.0` | httpx timeout on each of the agent's own `/health` reachability pings against MCP and Ollama. The two run concurrently on one client, inside the 5 s rag allows `/health?detail` |
 | `AI_AGENT_FRAPPE_URL` | `http://localhost:8000` | Frappe URL for chat history writes |
 | `AI_AGENT_OTEL_ENDPOINT` | _empty_ | OTLP gRPC endpoint. Empty = tracing disabled |
 | `AI_AGENT_OTEL_SERVICE_NAME` | `frappe-ai-agent` | Resource attribute on emitted spans |

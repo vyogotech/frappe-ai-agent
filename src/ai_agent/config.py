@@ -82,8 +82,9 @@ class Settings(BaseSettings):
     # One tool call's bound, on the call and on the session under it.
     mcp_tool_timeout_s: float = 30.0
 
-    # For /health's MCP and Ollama probes; keep it short so a slow downstream cannot stall it.
-    health_probe_timeout_s: float = 5.0
+    # Each /health probe's httpx timeout, per operation. The two run at once, so a hung
+    # dependency answers ok: False inside the 5 s rag allows the call (rag/rag/status.py).
+    health_probe_timeout_s: float = 2.0
 
     # Frappe URL for chat history persistence
     frappe_url: str = "http://localhost:8000"
