@@ -309,6 +309,10 @@ class ChatService:
                 sid=sid, name=session_id, title=_derive_title(title), context_json=context_json
             )
             return session_id, True
+        # asked on the read route before the turn's first write: a site without the chat doctypes
+        # answers a write with a 500 and an Error Log row of its own for each one
+        if not await self._history.chat_doctypes_exist(sid):
+            return f"tmp-{uuid4().hex[:8]}", False
         created = await self._history.create_session(
             sid=sid, title=_derive_title(title), context_json=context_json
         )

@@ -389,6 +389,14 @@ Message rows stop appearing in Frappe.
    the client auto-refreshes once, but a sustained block means the
    `/app` page is unreachable, see the
    `frappe_history_csrf_fetch_failed` log).
+4. If neither log line nor counter moves at all, the client has
+   stopped writing on purpose: grep
+   `frappe_history_off_app_not_installed`, which says the site has
+   no `frappe_ai` and therefore neither chat DocType, so every
+   write would be a `500` and an Error Log row on that site.
+   `frappe_history_off_no_chat_doctypes` is the same conclusion
+   reached from a write that got there first. Both are decided once
+   per process; install the app and restart the agent.
 
 ### Rate-limit `429`s
 

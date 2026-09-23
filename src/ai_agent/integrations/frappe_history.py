@@ -26,6 +26,9 @@ _history_write_failures = _meter.create_counter(
 
 _SESSION_URL_PATH = "/api/resource/AI Chat Session"
 _MESSAGE_URL_PATH = "/api/resource/AI Chat Message"
+_VERSIONS_URL_PATH = "/api/method/frappe.utils.change_log.get_versions"
+# the app that defines both doctypes; ADR-011 makes it their owner
+_HISTORY_APP = "frappe_ai"
 _CSRF_URL_PATH = "/app"
 _CSRF_HEADER = "X-Frappe-CSRF-Token"
 _CSRF_PATTERN = re.compile(r'csrf_token\s*=\s*"([0-9a-fA-F]+)"')
@@ -70,6 +73,10 @@ class FrappeHistoryClient:
         # One pooled client per instance, made lazily so a process that never writes opens no pool.
         self._client: httpx.AsyncClient | None = None
         self._closed = False
+        # Whether this site has the chat doctypes at all; None until it has been asked.
+        # ponytail: one agent process serves one site, and a site gains an app only through a
+        # bench install, so this is asked once and a later install needs a restart to be seen.
+        self._doctypes_exist: bool | None = None
 
     def _get_client(self) -> httpx.AsyncClient:
         # Raise, not rebuild: a new client here would leak, since aclose() returns once closed.
@@ -201,9 +208,37 @@ class FrappeHistoryClient:
             )
             return []
 
+    async def chat_doctypes_exist(self, sid: str) -> bool:
+        """Whether frappe_ai, which defines both chat doctypes, is on this site; asked once."""
+        # asked of get_versions, not of the doctypes: reading a doctype the site has not got is
+        # 404 only for a System Manager and 403 for everyone else, because frappe's own
+        # handle_does_not_exist_error re-dispatches it as the PermissionError on DocType
+        if self._doctypes_exist is None:
+            self._doctypes_exist = await self._the_app_is_installed(sid)
+            if not self._doctypes_exist:
+                logger.warning("frappe_history_off_app_not_installed", app=_HISTORY_APP)
+        return self._doctypes_exist
+
     # ---------------------------------------------------------------- #
     # internals
     # ---------------------------------------------------------------- #
+
+    async def _the_app_is_installed(self, sid: str) -> bool:
+        """True unless frappe names the site's active apps and frappe_ai is not among them."""
+        try:
+            response = await self._get_client().get(
+                f"{self._base_url}{_VERSIONS_URL_PATH}", headers=_headers(sid)
+            )
+            if response.status_code != 200:
+                return True  # an outage or a refusal is not an answer; write as before
+            return _HISTORY_APP in (response.json().get("message") or {})
+        except (httpx.HTTPError, ValueError, AttributeError, TypeError) as exc:
+            logger.warning(
+                "frappe_history_app_check_failed",
+                error_type=type(exc).__name__,
+                error=str(exc)[:200],
+            )
+            return True
 
     async def _fetch_csrf_token(self, sid: str) -> str | None:
         """The CSRF token inlined in the desk page (Frappe sends no header); None on any failure."""
@@ -273,10 +308,13 @@ class FrappeHistoryClient:
         sid: str,
         kind: str,
     ) -> str | None:
+        # Outside the try, which swallows Frappe outages: use-after-close must raise.
+        client = self._get_client()
+        if self._doctypes_exist is False:
+            return None
+
         with _tracer.start_as_current_span("agent.history.write") as span:
             span.set_attribute("kind", kind)
-            # Outside the try, which swallows Frappe outages: use-after-close must raise.
-            client = self._get_client()
 
             try:
                 csrf_token = await self._csrf_token_for(sid)
@@ -293,6 +331,14 @@ class FrappeHistoryClient:
                     if fresh:
                         headers[_CSRF_HEADER] = fresh
                         response = await client.post(url, json=payload, headers=headers)
+
+                if response.status_code == 500 and _names_a_missing_controller(response):
+                    # a caller that brings its own session id writes before it is ever asked
+                    if self._doctypes_exist is not False:
+                        logger.warning("frappe_history_off_no_chat_doctypes", kind=kind)
+                    self._doctypes_exist = False
+                    span.set_attribute("history_off", True)
+                    return None
 
                 # 409 on a named session is ensure_session re-posting an existing row: success, not
                 # a failed write. Messages are auto-named, so a 409 there is a real failure.
@@ -326,6 +372,14 @@ class FrappeHistoryClient:
                 if status_code is not None:
                     span.set_attribute("status_code", status_code)
                 return None
+
+
+def _names_a_missing_controller(response: httpx.Response) -> bool:
+    """Whether frappe's 500 is the controller import it cannot do; v1 names the class."""
+    try:
+        return response.json().get("exc_type") == "ImportError"
+    except (ValueError, AttributeError, httpx.ResponseNotRead, httpx.DecodingError):
+        return False
 
 
 def _looks_like_csrf_error(response: httpx.Response) -> bool:
