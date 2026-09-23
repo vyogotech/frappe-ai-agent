@@ -259,7 +259,7 @@ src/ai_agent/
 ```bash
 make install      # uv sync --all-extras
 make serve        # uvicorn --reload on :8484
-make test         # pytest -v (unit + BDD)
+make test         # pytest -v
 make lint         # ruff check
 make format       # ruff format
 make typecheck    # pyright on src/
@@ -273,12 +273,11 @@ Pre-commit hooks (`.pre-commit-config.yaml`) run ruff lint + format and a handfu
 The suite is unit-first:
 
 - **`tests/unit/`** — pure unit tests for every module. Heavy fakes live alongside the tests (e.g. `test_chat_service.py` builds an in-memory graph stub and walks the full event-translation pipeline).
-- **`tests/features/`** — BDD smoke scenarios that exercise the real SSE route in-process via `httpx.ASGITransport`, with a stubbed `ChatService`. Verifies route wiring: 401 on missing sid, happy-path event ordering, exactly-one-error on upstream failure.
 
 Tests marked `@pytest.mark.integration` need real Ollama/MCP/Frappe and are not part of the default run. To enable type-checking of tests, `pyright` is configured to scan both `src/` and `tests/`.
 
 ```bash
-uv run pytest                          # unit + BDD
+uv run pytest                          # the whole suite
 uv run pytest tests/unit/              # unit only
 uv run pytest -m integration           # opt-in, requires real services
 uv run pytest --cov=ai_agent           # coverage

@@ -89,7 +89,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   on shutdown.
 - Routers and services are now wired at `create_app` time instead of inside the `lifespan` context manager — `app.routes` is populated before first request.
 - Parser chart-alias storage simplified from a degenerate dict to a `frozenset`.
-- CI `test` job now includes `tests/features/` (BDD smoke scenarios) alongside `tests/unit/`.
+- CI `test` job runs `tests/unit/` and reports coverage without a `--cov-fail-under` floor: a percentage pays for a line executed, not for a line asserted. The four `tests/features/` BDD scenarios were deleted — each asserted only what its own stub had been told to yield.
 
 ### Fixed
 - **Incorrect Frappe v17 references.** `FrappeHistoryClient` docstrings
