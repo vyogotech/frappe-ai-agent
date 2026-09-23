@@ -191,11 +191,7 @@ class ChatService:
         user_context: UserContext,
         confirmation: dict[str, Any] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        """Yield one turn's SSE events; an AsyncGenerator, so aclose() can stop it on disconnect.
-
-        `confirmation` is a `{tool, arguments, token}` write the user allowed: that turn asks no
-        question of its own, saves no user row, and runs the stored call before the model speaks.
-        """
+        """Yield one turn's SSE events; an AsyncGenerator, so aclose() can stop it on disconnect."""
         user_message = CONFIRMED_TURN if confirmation else (message or "")
         tools_called: list[str] = []
         tool_invocations: list[dict[str, Any]] = []

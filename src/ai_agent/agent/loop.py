@@ -120,11 +120,7 @@ async def run_agent_loop(
     session: str | None = None,
     confirmed: dict[str, Any] | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
-    """Yield the turn's agent events; session, done and error are left to services/chat.py.
-
-    `confirmed` is a `{name, arguments}` write the user allowed: it runs before the model does,
-    and the model only narrates its result.
-    """
+    """Yield the turn's agent events; a `confirmed` write runs first and the model narrates it."""
     # Pin `tool_call.name` to the tools actually loaded this turn — see
     # `block_envelope_schema`. A bare-string `name` lets small models emit
     # `{"name": ""}`, which is schema-valid and unexecutable.

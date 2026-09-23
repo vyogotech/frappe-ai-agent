@@ -31,9 +31,6 @@ def build_mcp_client_for_sid(
 ) -> MultiServerMCPClient:
     """A new client per call, forwarding `sid`: shared, it would carry one user's sid to another.
 
-    `confirmation_token` is the one-time grant the MCP server redeems before a write. It travels
-    as a header, so it is in no tool argument, no saved row and nothing the model ever reads.
-
     Raises:
         ValueError: `sid` is empty or whitespace-only.
     """
