@@ -67,6 +67,9 @@ def setup_logging(level: str = "info", log_format: str = "json") -> None:
     )
 
     formatter = structlog.stdlib.ProcessorFormatter(
+        # Without it a record from a logger structlog does not wrap — slowapi, mcp, uvicorn —
+        # reaches the renderer as a bare {"event": message}, with no level, logger or timestamp.
+        foreign_pre_chain=shared_processors,
         processors=[
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
             renderer,
@@ -81,6 +84,15 @@ def setup_logging(level: str = "info", log_format: str = "json") -> None:
     root.addHandler(handler)
     root.setLevel(log_level)
 
-    # Quiet noisy libraries
-    for name in ("uvicorn.access", "httpx", "httpcore"):
+    # uvicorn.config.LOGGING_CONFIG gives these a stderr handler of their own, propagate=False
+    # and a level of INFO, so their lines would never reach the handler above nor honour `level`.
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        uvicorn_logger = logging.getLogger(name)
+        uvicorn_logger.handlers.clear()
+        uvicorn_logger.propagate = True
+        uvicorn_logger.setLevel(logging.NOTSET)
+
+    # Quiet noisy libraries. `mcp` covers mcp.client.streamable_http, which announces the
+    # negotiated protocol version on every session the adapter opens.
+    for name in ("uvicorn.access", "httpx", "httpcore", "mcp"):
         logging.getLogger(name).setLevel(logging.WARNING)
