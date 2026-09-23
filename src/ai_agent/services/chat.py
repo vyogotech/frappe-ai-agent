@@ -265,81 +265,81 @@ class ChatService:
             _tracer.start_as_current_span("agent.chat_turn") as turn_span,
             _log_when_cancelled(turn, tools_called, assistant_text_parts),
         ):
-            if session_id is None:
-                created = await self._history.create_session(
-                    sid=user_context.sid,
-                    title=_derive_title(user_message),
-                    context_json=json.dumps(context or {}),
-                )
-                if created is None:
-                    session_id = f"tmp-{uuid4().hex[:8]}"
-                    logger.warning(
-                        "chat_history_session_create_failed_using_tmp",
-                        session_id=session_id,
-                    )
-                else:
-                    session_id = created
-            else:
-                # save_message 417s until this session row exists; a duplicate create is a no-op.
-                await self._history.ensure_session(
-                    sid=user_context.sid,
-                    name=session_id,
-                    title=_derive_title(user_message),
-                    context_json=json.dumps(context or {}),
-                )
-
-            turn_span.set_attribute("session_id", session_id)
-            turn["session_id"] = session_id
-
-            # The frontend sends this id back; without it every message opens a new session.
-            yield {"type": "session", "id": session_id}
-
-            # Read before the question is saved, so the history holds only earlier turns.
-            history_messages: list[BaseMessage] = []
-            if session_id and not session_id.startswith("tmp-"):
-                try:
-                    rows = await self._history.list_messages(
-                        sid=user_context.sid,
-                        session=session_id,
-                        limit=20,
-                    )
-                except Exception as exc:  # noqa: BLE001 - a history read never aborts the answer
-                    logger.warning(
-                        "chat_history_load_failed_using_empty",
-                        session_id=session_id,
-                        error_type=type(exc).__name__,
-                        error=str(exc)[:200],
-                    )
-                    rows = []
-                for row in rows:
-                    content = cap_for_prompt(
-                        row["content"], self._settings.agent_prompt_text_max_chars
-                    )
-                    if row["role"] == "user":
-                        history_messages.append(HumanMessage(content=content))
-                    else:
-                        history_messages.append(AIMessage(content=content))
-
-            # Persist the user's message. Best-effort: a Frappe outage must
-            # not abort the chat turn — log and continue. A confirmed turn has no message of the
-            # user's, and saving the agent's stand-in line would replay it as one next turn.
-            if confirmation is None:
-                try:
-                    await self._history.save_message(
-                        sid=user_context.sid,
-                        session=session_id,
-                        role="user",
-                        content=user_message,
-                    )
-                except Exception as exc:  # noqa: BLE001 - a history write never aborts the answer
-                    logger.warning(
-                        "chat_history_user_message_write_failed",
-                        session_id=session_id,
-                        error_type=type(exc).__name__,
-                        error=str(exc)[:200],
-                    )
-
             try:
+                if session_id is None:
+                    created = await self._history.create_session(
+                        sid=user_context.sid,
+                        title=_derive_title(user_message),
+                        context_json=json.dumps(context or {}),
+                    )
+                    if created is None:
+                        session_id = f"tmp-{uuid4().hex[:8]}"
+                        logger.warning(
+                            "chat_history_session_create_failed_using_tmp",
+                            session_id=session_id,
+                        )
+                    else:
+                        session_id = created
+                else:
+                    # save_message 417s until this row exists; a duplicate create is a no-op.
+                    await self._history.ensure_session(
+                        sid=user_context.sid,
+                        name=session_id,
+                        title=_derive_title(user_message),
+                        context_json=json.dumps(context or {}),
+                    )
+
+                turn_span.set_attribute("session_id", session_id)
+                turn["session_id"] = session_id
+
+                # The frontend sends this id back; without it every message opens a new session.
+                yield {"type": "session", "id": session_id}
+
+                # Read before the question is saved, so the history holds only earlier turns.
+                history_messages: list[BaseMessage] = []
+                if session_id and not session_id.startswith("tmp-"):
+                    try:
+                        rows = await self._history.list_messages(
+                            sid=user_context.sid,
+                            session=session_id,
+                            limit=20,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - a history read never aborts the answer
+                        logger.warning(
+                            "chat_history_load_failed_using_empty",
+                            session_id=session_id,
+                            error_type=type(exc).__name__,
+                            error=str(exc)[:200],
+                        )
+                        rows = []
+                    for row in rows:
+                        content = cap_for_prompt(
+                            row["content"], self._settings.agent_prompt_text_max_chars
+                        )
+                        if row["role"] == "user":
+                            history_messages.append(HumanMessage(content=content))
+                        else:
+                            history_messages.append(AIMessage(content=content))
+
+                # Persist the user's message. Best-effort: a Frappe outage must
+                # not abort the chat turn — log and continue. A confirmed turn has no message of the
+                # user's, and saving the agent's stand-in line would replay it as one next turn.
+                if confirmation is None:
+                    try:
+                        await self._history.save_message(
+                            sid=user_context.sid,
+                            session=session_id,
+                            role="user",
+                            content=user_message,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - a history write never aborts the answer
+                        logger.warning(
+                            "chat_history_user_message_write_failed",
+                            session_id=session_id,
+                            error_type=type(exc).__name__,
+                            error=str(exc)[:200],
+                        )
+
                 # Per-request MCP client carrying the caller's sid cookie.
                 mcp_client = build_mcp_client_for_sid(
                     self._settings,
@@ -518,7 +518,8 @@ class ChatService:
                 if failed
                 else "".join(assistant_text_parts)
             )
-            await save_answer(assistant_content, session_id)
+            if session_id is not None:  # the session write itself is what failed; nowhere to save
+                await save_answer(assistant_content, session_id)
 
             usage = _usage(decode, first_token)
             # A tool failure never raises — it comes back as a result the model reads — so a
