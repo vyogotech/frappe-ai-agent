@@ -78,6 +78,16 @@ def _tools_unavailable_message(root: BaseException) -> str:
     return "Tools unavailable."
 
 
+def _source_ref(item: dict[str, Any]) -> dict[str, Any]:
+    """A source as it is saved: the file and the passage's place in it, never the passage itself."""
+    ref: dict[str, Any] = {"file": item.get("file"), "seq": item.get("seq")}
+    if item.get("attachment"):
+        # a chat's attachment is in no Drive listing, so this row is the only copy of its name
+        ref |= {"file_name": item.get("file_name"), "attachment": True}
+    # no score rather than no field: a reader computes relevance from it, and a missing one is NaN
+    return ref | {"distance": None}
+
+
 def _utcnow_rfc3339_z() -> str:
     """RFC3339 timestamp ending in `Z` (matches frappe-mcp-server format)."""
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -425,9 +435,12 @@ class ChatService:
             usage = (decode.summary() or {}) | (
                 {"first_token_s": first_token} if first_token is not None else {}
             )
+            saved_sources = list(
+                {(s.get("file"), s.get("seq")): _source_ref(s) for s in sources_seen}.values()
+            )
             tool_result_json = (
                 json.dumps(
-                    {"sources": sources_seen, "blocks": blocks_seen}
+                    {"sources": saved_sources, "blocks": blocks_seen}
                     | ({"usage": usage} if usage else {})
                 )
                 if sources_seen or blocks_seen or usage

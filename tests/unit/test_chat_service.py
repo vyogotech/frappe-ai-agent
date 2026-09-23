@@ -933,7 +933,7 @@ async def test_handle_message_aclose_mid_stream_does_not_raise():
 
 
 async def test_assistant_message_keeps_sources_and_blocks():
-    """Blocks and passages used to vanish on reload: the row kept only the joined text."""
+    """Blocks and passages used to vanish on reload; a passage is kept as a reference (D08)."""
     service = _make_service()
     fake_history = MagicMock()
     fake_history.ensure_session = AsyncMock(side_effect=lambda *, name, **_: name)
@@ -967,7 +967,8 @@ async def test_assistant_message_keeps_sources_and_blocks():
     saved = fake_history.save_message.call_args_list[-1].kwargs
     kept = json.loads(saved["tool_result_json"])
     assert kept.pop("usage").keys() == {"first_token_s"}  # the answer's text had a first moment
-    assert kept == {"sources": [item], "blocks": [block]}
+    ref = {"file": item["file"], "seq": item["seq"], "distance": None}
+    assert kept == {"sources": [ref], "blocks": [block]}
 
 
 @pytest.mark.asyncio

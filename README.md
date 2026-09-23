@@ -209,6 +209,8 @@ Chat history is persisted to two Frappe DocTypes:
 - `AI Chat Session` — created on the first turn of a new conversation. `title` is the first ~60 chars of the user's message; `context_json` is the page context payload.
 - `AI Chat Message` — one row per user/assistant message. Tool invocations from the assistant's turn are stored as JSON in `tool_args_json`.
 
+An answer's `tool_result_json` keeps its content blocks and, for every passage the answer used, only the file and the passage's position in it (`file`, `seq`, and for a file attached to the chat its `file_name`) — never the passage text, which is streamed live and then belongs to the document. A reader who reopens the chat therefore sees the source's file and position, not a copy of the text as it was: reading the excerpt back from the knowledge base under that reader's own permissions is Metis's half of this change and is not in place yet, so today a reopened chat shows the source without its excerpt. Rows written before this still hold the old `content`; nothing here reads it, and a chat that has them still opens.
+
 Writes go through Frappe's REST API with the caller's `sid`. The client handles Frappe's HTML-embedded CSRF token: it GETs `/app`, regexes the `csrf_token = "<hex>"` JS variable, caches it per `sid`, and refreshes it once on a 400 CSRF error.
 
 History writes are **best-effort** — failures are logged but never abort the conversation. If session creation fails, the agent falls back to a `tmp-<hex>` id so the rest of the request still works (and the user just loses persistence for that turn).
