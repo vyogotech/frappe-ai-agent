@@ -68,11 +68,11 @@ jobs:
     env:
       # What ragbot's Makefile, compose.demo.yaml and apps.json ship; one edit moves the job
       FRAPPE_BRANCH: version-16
-      FRAPPE_PY: "3.12"
+      FRAPPE_PY: "3.14"
       OLLAMA_MODEL: qwen3:0.6b
       OLLAMA_IMAGE: ollama/ollama:0.34.1
       MCP_REPO: vyogotech/frappe-mcp-server
-      MCP_REF: 5c8fa163acf157ffb738b7d4a6923f3c3ddf6c1f
+      MCP_REF: main
       FRAPPE_AI_REPO: vyogotech/frappe_ai
       # a branch because apps.json is too; keep it equal to the branch apps.json installs
       FRAPPE_AI_REF: main
