@@ -99,6 +99,14 @@ class Settings(BaseSettings):
     usage_check_url: str = ""
     usage_check_token: str = ""
     usage_check_timeout_s: float = 5.0
+    # The usage service may answer an allowed message with `llm`: {base_url, api_key, user} for
+    # that site's user. The turn then calls the model with them instead of llm_base_url /
+    # llm_api_key, sending `user` as the OpenAI user field. Kept per site and user this long, for
+    # an unreachable usage service and for confirmed turns, which it never sees.
+    usage_credentials_ttl_s: float = 300.0
+    # On: a turn with no such credentials (none answered, none kept) is refused instead of using
+    # llm_api_key. Off (default): llm_api_key, as before.
+    llm_credentials_required: bool = False
 
     # MCP: Streamable HTTP endpoint. frappe-mcp-server mounts /mcp on its
     # main HTTP port (default 8080), NOT the port+1 MCP-protocol-only server.

@@ -186,6 +186,8 @@ there is silent — check the resolved values on `GET /config`.
 | `AI_AGENT_USAGE_CHECK_URL` | *(empty)* | Optional usage gate: before answering a typed message, POST `{"site", "user"}` here and refuse the turn with the returned `reason` when it answers `allowed: false`. Empty = no check |
 | `AI_AGENT_USAGE_CHECK_TOKEN` | *(empty)* | Sent as the `X-Usage-Token` header to the usage check |
 | `AI_AGENT_USAGE_CHECK_TIMEOUT_S` | `5.0` | How long to wait for the usage check; unreachable or 5xx lets the message through, 4xx refuses it |
+| `AI_AGENT_USAGE_CREDENTIALS_TTL_S` | `300.0` | How long the model credentials an allowed usage answer may carry (`llm`: base URL, key, user) are kept per site and user, for an unreachable usage service and for confirmed turns |
+| `AI_AGENT_LLM_CREDENTIALS_REQUIRED` | `false` | Refuse a turn the usage service gave no model credentials for, instead of using `AI_AGENT_LLM_API_KEY` |
 | `AI_AGENT_MCP_TOOLS_LOAD_TIMEOUT_S` | `20.0` | Per-request bound on `tools/list`. A timeout becomes a single SSE `error` event, not a hung stream |
 | `AI_AGENT_MCP_TOOL_TIMEOUT_S` | `30.0` | Bound on one tool call, and on the HTTP and SSE read timeouts of the MCP session under it. A timeout comes back as a tool result the model can answer around |
 | `AI_AGENT_WEB_SEARCH_PROVIDER` | `off` | The backend of the agent's built-in `web_search` tool: `searxng` (self-hosted, needs `AI_AGENT_WEB_SEARCH_URL`), `brave` or `tavily` (need `AI_AGENT_WEB_SEARCH_API_KEY`), `duckduckgo` (no key, laptop use only), or `off` to register no web tools. See "Web search" |

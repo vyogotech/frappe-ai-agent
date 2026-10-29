@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
+from collections import OrderedDict
 from collections.abc import AsyncGenerator, Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -36,6 +38,7 @@ from ai_agent.integrations.frappe_history import FrappeHistoryClient
 from ai_agent.integrations.llm import create_llm
 from ai_agent.integrations.mcp import build_mcp_client_for_sid, filter_deprecated
 from ai_agent.integrations.models import ModelCatalog
+from ai_agent.integrations.usage import LLMCredentials
 from ai_agent.middleware.sid import UserContext
 from ai_agent.middleware.site import set_current, set_current_bench_url
 
@@ -51,6 +54,11 @@ TURN_TOO_LONG = "This took too long. Try a shorter question."
 TOOLS_TIMED_OUT = "The assistant's tools timed out. Try again."
 ANSWER_FAILED = "The answer could not be completed. Try again."
 ANSWER_STOPPED = "The answer was stopped. Ask again for a full answer."
+# A model API refusing a call, in plain words (any OpenAI-compatible service).
+MODEL_LIMIT = "This site has reached its AI usage limit."
+MODEL_RATE = "Too many requests to the AI model. Try again in a minute."
+MODEL_REFUSED = "The AI model is not available for this site right now."
+_SUPPLIED_LLMS_MAX = 256
 
 # The confirmed turn's question, written here rather than by the model: the user clicked a button,
 # so there is no message of theirs to replay and nothing of the model's may stand in for one.
@@ -80,6 +88,24 @@ async def _until(
         except TimeoutError as exc:
             raise TurnFailure(TURN_TOO_LONG) from exc
         yield event
+
+
+def _model_refusal(exc: BaseException) -> str | None:
+    """A plain line for a model API refusing the call (quota, rate limit, access), else None.
+
+    By HTTP status, as OpenAI-compatible services report them; anything else keeps the
+    generic failure line, with its detail in the log."""
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        return None
+    text = str(exc).lower()
+    if status == 402 or (status in (400, 403, 422, 429) and ("quota" in text or "budget" in text)):
+        return MODEL_LIMIT
+    if status == 429:
+        return MODEL_RATE
+    if status in (401, 403):
+        return MODEL_REFUSED
+    return None
 
 
 def _root_cause(exc: BaseException) -> BaseException:
@@ -362,6 +388,9 @@ class ChatService:
         self._models = models or ModelCatalog(settings)
         # one client per model a user picked, made on first use; the default is the one passed in
         self._llms: dict[str, BaseChatModel] = {settings.llm_model: llm}
+        # one client per (model, base URL, key, user) the usage service supplied; least recently
+        # used dropped first
+        self._supplied_llms: OrderedDict[tuple[str, str, str, str], BaseChatModel] = OrderedDict()
         self._build_system_prompt = system_prompt_builder
         self._history = history or FrappeHistoryClient(base_url=settings.frappe_url)
         # Built once: the web tools carry no per-user state, unlike the MCP client.
@@ -371,8 +400,41 @@ class ChatService:
         self._skill_tool = build_skill_tool(self._skills)
         self._skills_catalog = build_skills_catalog(self._skills)
 
-    async def _llm_for(self, model: Any) -> BaseChatModel:
-        """The model this turn asked for when the provider offers it; the default otherwise."""
+    async def _llm_for(
+        self, model: Any, credentials: LLMCredentials | None = None
+    ) -> BaseChatModel:
+        """The model this turn asked for when the provider offers it; the default otherwise.
+
+        With credentials the usage service supplied for this site, the call uses them instead
+        of the agent's own base URL and key."""
+        if credentials is not None:
+            name = self._settings.llm_model
+            if (
+                isinstance(model, str)
+                and model
+                and model != name
+                and await self._models.offers(model)
+            ):
+                name = model
+            digest = hashlib.sha256(credentials.api_key.encode()).hexdigest()[:16]
+            key = (name, credentials.base_url, digest, credentials.user or "")
+            if key in self._supplied_llms:
+                self._supplied_llms.move_to_end(key)
+                return self._supplied_llms[key]
+            llm = create_llm(
+                self._settings.model_copy(
+                    update={
+                        "llm_model": name,
+                        "llm_base_url": credentials.base_url,
+                        "llm_api_key": credentials.api_key,
+                    }
+                ),
+                end_user=credentials.user,
+            )
+            self._supplied_llms[key] = llm
+            while len(self._supplied_llms) > _SUPPLIED_LLMS_MAX:
+                self._supplied_llms.popitem(last=False)
+            return llm
         if not isinstance(model, str) or model == self._settings.llm_model:
             return self._llm
         if not await self._models.offers(model):
@@ -547,6 +609,7 @@ class ChatService:
         context: dict[str, Any],
         user_context: UserContext,
         confirmation: dict[str, Any] | None = None,
+        llm_credentials: LLMCredentials | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Yield one turn's SSE events; an AsyncGenerator, so aclose() can stop it on disconnect."""
         user_message = CONFIRMED_TURN if confirmation else (message or "")
@@ -692,7 +755,9 @@ class ChatService:
                         async for ev in _until(
                             deadline,
                             run_agent_loop(
-                                llm=await self._llm_for((context or {}).get("model")),
+                                llm=await self._llm_for(
+                                    (context or {}).get("model"), llm_credentials
+                                ),
                                 tool_registry=tool_registry,
                                 user_message=user_message,
                                 context_preamble=context_preamble,
@@ -745,7 +810,9 @@ class ChatService:
                     # One plain line per kind of failure: only a TurnFailure carries a line written
                     # for the user, and every other exception's type and text stay in the log above.
                     error_message = (
-                        str(display_exc) if isinstance(display_exc, TurnFailure) else ANSWER_FAILED
+                        str(display_exc)
+                        if isinstance(display_exc, TurnFailure)
+                        else _model_refusal(display_exc) or ANSWER_FAILED
                     )
                     yield {"type": "error", "message": error_message}
 

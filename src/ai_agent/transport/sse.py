@@ -101,20 +101,28 @@ def create_sse_router(
         # parameter named exactly `request`.
         chat_service = request.app.state.chat_service
 
-        # Only a typed message counts toward usage; allowing a proposed write does not.
+        # Only a typed message counts toward usage; allowing a proposed write does not. A
+        # confirmed turn still calls the model, so it reuses the model credentials the usage
+        # service last gave this site's user, if it gives any.
         settings = getattr(request.app.state, "settings", None)
-        if settings is not None and body.message is not None:
-            reason = await usage.refusal_reason(settings, user_context.site, user_context.user)
-            if reason:
+        credentials = None
+        reason = None
+        if settings is not None and settings.usage_check_url.strip():
+            if body.message is not None:
+                answer = await usage.check(settings, user_context.site, user_context.user)
+            else:
+                answer = usage.without_answer(settings, user_context.site, user_context.user)
+            reason, credentials = answer.refusal, answer.credentials
+        if reason:
 
-                async def refused():
-                    yield serialize({"type": "error", "message": reason})
+            async def refused():
+                yield serialize({"type": "error", "message": reason})
 
-                return StreamingResponse(
-                    refused(),
-                    media_type="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-                )
+            return StreamingResponse(
+                refused(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
 
         async def event_stream():
             async for event in chat_service.handle_message(
@@ -123,6 +131,8 @@ def create_sse_router(
                 context=body.context,
                 user_context=user_context,
                 confirmation=body.confirmation.model_dump() if body.confirmation else None,
+                # only when there are some, so a service that predates them still fits
+                **({"llm_credentials": credentials} if credentials else {}),
             ):
                 yield serialize(event)
 

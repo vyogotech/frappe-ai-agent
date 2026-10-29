@@ -9,7 +9,9 @@ from langchain_ollama import ChatOllama
 from ai_agent.config import Settings
 
 
-def create_llm(settings: Settings) -> BaseChatModel:
+def create_llm(settings: Settings, *, end_user: str | None = None) -> BaseChatModel:
+    """The chat model for these settings. `end_user`, when given, is sent as the OpenAI `user`
+    field on every call (an OpenAI-compatible provider only)."""
     provider = settings.llm_provider.lower()
 
     if provider == "ollama":
@@ -27,6 +29,7 @@ def create_llm(settings: Settings) -> BaseChatModel:
             client_kwargs={"timeout": settings.llm_request_timeout_s},
         )
 
+    extra = {"extra_body": {"user": end_user}} if end_user and provider == "openai" else {}
     return init_chat_model(
         settings.llm_model,
         model_provider=settings.llm_provider,
@@ -35,4 +38,5 @@ def create_llm(settings: Settings) -> BaseChatModel:
         temperature=settings.llm_temperature,
         max_tokens=settings.llm_max_tokens,
         timeout=settings.llm_request_timeout_s,
+        **extra,
     )
